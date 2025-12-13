@@ -1,298 +1,375 @@
 import os
+import asyncio
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (
-    Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    InputMediaPhoto,
-)
 from dotenv import load_dotenv
 
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InputMediaPhoto,
+)
+from aiogram.filters import CommandStart
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
+
+
+# ----------------------------
+# ENV
+# ----------------------------
 load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+GROUP_ID_RAW = os.getenv("GROUP_ID", "").strip()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_ID = os.getenv("GROUP_ID")  # ваша група/канал для публікації: -100...
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is missing. Set it in environment variables.")
 
-# ---------- Дані (поки що in-memory) ----------
+try:
+    GROUP_ID = int(GROUP_ID_RAW)
+except Exception:
+    raise RuntimeError("GROUP_ID is missing or invalid. Must be an integer like -100xxxxxxxxxx.")
+
+
+# ----------------------------
+# Data model (in-memory)
+# ----------------------------
 @dataclass
 class Offer:
-    category: Optional[str] = None
-    street: Optional[str] = None
-    district: Optional[str] = None
-    perks: Optional[str] = None
-    rent: Optional[str] = None
-    deposit: Optional[str] = None
-    commission: Optional[str] = None
-    parking: Optional[str] = None
-    move_in: Optional[str] = None
-    viewings: Optional[str] = None
+    category: Optional[str] = None       # Оренда / Продаж
+    property_type: Optional[str] = None  # Квартира / Будинок / Кімната / ...
+    city_area: Optional[str] = None      # Місто / Район
+    address: Optional[str] = None
+    price: Optional[str] = None
     contact: Optional[str] = None
-    photos: List[str] = field(default_factory=list)  # file_id
-
-OFFERS_BY_USER: Dict[int, Offer] = {}
-PUBLISHED: List[Offer] = []
+    notes: Optional[str] = None
+    photos: List[str] = field(default_factory=list)  # file_id list
 
 
-# ---------- FSM ----------
+OFFERS: Dict[int, Offer] = {}  # user_id -> Offer
+
+
+def get_offer(user_id: int) -> Offer:
+    if user_id not in OFFERS:
+        OFFERS[user_id] = Offer()
+    return OFFERS[user_id]
+
+
+def reset_offer(user_id: int) -> None:
+    OFFERS[user_id] = Offer()
+
+
+# ----------------------------
+# FSM
+# ----------------------------
 class OfferFlow(StatesGroup):
     category = State()
-    street = State()
-    district = State()
-    perks = State()
-    rent = State()
-    deposit = State()
-    commission = State()
-    parking = State()
-    move_in = State()
-    viewings = State()
+    property_type = State()
+    city_area = State()
+    address = State()
+    price = State()
     contact = State()
-    photos_decision = State()
+    notes = State()
     photos_collect = State()
     confirm = State()
 
 
-# ---------- Клавіатури ----------
-def kb_main():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏠 Пропоную житло", callback_data="offer_start")],
-        [InlineKeyboardButton(text="🔎 Шукаю житло (перегляд)", callback_data="search_start")],
-    ])
-
-def kb_category():
-    items = [
-        ("Кімната", "cat_room"),
-        ("Студія", "cat_studio"),
-        ("Квартира", "cat_flat"),
-        ("Будинок", "cat_house"),
-    ]
-    rows = []
-    for i in range(0, len(items), 2):
-        rows.append([InlineKeyboardButton(text=t, callback_data=cb) for t, cb in items[i:i+2]])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-def kb_district():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Центр", callback_data="dist_center"),
-         InlineKeyboardButton(text="Старе Місто", callback_data="dist_old")],
-        [InlineKeyboardButton(text="Петржалка", callback_data="dist_petrzalka")],
-        [InlineKeyboardButton(text="Інше (вписати)", callback_data="dist_other")],
-    ])
-
-def kb_yes_no(prefix: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Так", callback_data=f"{prefix}_yes"),
-         InlineKeyboardButton(text="Ні", callback_data=f"{prefix}_no")],
-    ])
-
-def kb_move_in():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Одразу", callback_data="move_now"),
-         InlineKeyboardButton(text="З дати (вписати)", callback_data="move_date")],
-        [InlineKeyboardButton(text="За домовленістю", callback_data="move_agree")],
-    ])
-
-def kb_confirm():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Опублікувати", callback_data="confirm_publish")],
-        [InlineKeyboardButton(text="↩️ Назад (поправити контакт)", callback_data="confirm_back")],
-        [InlineKeyboardButton(text="❌ Скасувати", callback_data="confirm_cancel")],
-    ])
-
-def kb_search_nav(idx: int, total: int):
-    prev_cb = f"search_prev:{idx}"
-    next_cb = f"search_next:{idx}"
-    rows = []
-    nav = []
-    if total > 1:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=prev_cb))
-        nav.append(InlineKeyboardButton(text=f"{idx+1}/{total}", callback_data="noop"))
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=next_cb))
-        rows.append(nav)
-    rows.append([InlineKeyboardButton(text="🏠 Додати пропозицію", callback_data="offer_start")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-# ---------- Допоміжне ----------
-def get_offer(user_id: int) -> Offer:
-    if user_id not in OFFERS_BY_USER:
-        OFFERS_BY_USER[user_id] = Offer()
-    return OFFERS_BY_USER[user_id]
-
-def offer_text(o: Offer) -> str:
-    return (
-        "📢 *НОВА ПРОПОЗИЦІЯ*\n"
-        f"🏷️ Тип: {o.category or '-'}\n"
-        f"📍 Локація: {o.street or '-'}\n"
-        f"🗺️ Район: {o.district or '-'}\n"
-        f"✨ Переваги: {o.perks or '-'}\n"
-        f"💶 Оренда: {o.rent or '-'}\n"
-        f"💰 Депозит: {o.deposit or '-'}\n"
-        f"🧾 Комісія: {o.commission or '-'}\n"
-        f"🅿️ Парковка: {o.parking or '-'}\n"
-        f"📆 Заселення: {o.move_in or '-'}\n"
-        f"👀 Перегляди: {o.viewings or '-'}\n"
-        f"📞 Контакт: {o.contact or '-'}\n"
-        f"🖼️ Фото: {len(o.photos)}"
+# ----------------------------
+# UI helpers
+# ----------------------------
+def main_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🏠 Пропоную житло")],
+            [KeyboardButton(text="🔍 Шукаю житло")],
+            [KeyboardButton(text="ℹ️ Правила / Як працює")],
+        ],
+        resize_keyboard=True,
+        selective=True,
     )
 
 
-# ---------- Bot ----------
-dp = Dispatcher()
+def kb_offer_category() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🏠 Оренда", callback_data="offer_cat:Оренда"),
+            InlineKeyboardButton(text="🏷️ Продаж", callback_data="offer_cat:Продаж"),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="nav:home")]
+    ])
+
+
+def kb_property_type() -> InlineKeyboardMarkup:
+    types = ["Квартира", "Будинок", "Кімната", "Комерція", "Ділянка", "Інше"]
+    rows = []
+    for i in range(0, len(types), 2):
+        row = [InlineKeyboardButton(text=types[i], callback_data=f"offer_type:{types[i]}")]
+        if i + 1 < len(types):
+            row.append(InlineKeyboardButton(text=types[i+1], callback_data=f"offer_type:{types[i+1]}"))
+        rows.append(row)
+
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="nav:cat")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_confirm() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Опублікувати", callback_data="offer_confirm:publish"),
+            InlineKeyboardButton(text="❌ Скасувати", callback_data="offer_confirm:cancel"),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="nav:photos")]
+    ])
+
+
+def format_offer(o: Offer) -> str:
+    lines = []
+    lines.append("🆕 *Нове оголошення*")
+    if o.category:
+        lines.append(f"📌 *Категорія:* {o.category}")
+    if o.property_type:
+        lines.append(f"🏡 *Тип:* {o.property_type}")
+    if o.city_area:
+        lines.append(f"📍 *Місто/район:* {o.city_area}")
+    if o.address:
+        lines.append(f"🧭 *Адреса:* {o.address}")
+    if o.price:
+        lines.append(f"💰 *Ціна:* {o.price}")
+    if o.contact:
+        lines.append(f"☎️ *Контакт:* {o.contact}")
+    if o.notes:
+        lines.append(f"📝 *Додатково:* {o.notes}")
+    if o.photos:
+        lines.append(f"🖼️ *Фото:* {len(o.photos)} шт.")
+    lines.append("\n#нерухомість")
+    return "\n".join(lines)
+
+
+# ----------------------------
+# Bot setup
+# ----------------------------
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
 
 @dp.message(CommandStart())
-async def cmd_start(m: Message, state: FSMContext):
+async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await m.answer("Вітаю! Оберіть дію:", reply_markup=kb_main())
+    reset_offer(message.from_user.id)
+    await message.answer(
+        "Привіт! Я бот для публікації оголошень у вашу групу.\n"
+        "Обери дію нижче 👇",
+        reply_markup=main_menu_kb()
+    )
 
-# ====== Пропоную ======
-@dp.callback_query(F.data == "offer_start")
-async def offer_start(c: CallbackQuery, state: FSMContext):
-    OFFERS_BY_USER[c.from_user.id] = Offer()
+
+@dp.message(F.text == "ℹ️ Правила / Як працює")
+async def how_it_works(message: Message):
+    await message.answer(
+        "ℹ️ *Як працює бот*\n\n"
+        "1) Натисни *🏠 Пропоную житло*\n"
+        "2) Відповідай на питання (категорія, тип, адреса, ціна, контакт)\n"
+        "3) Додай фото (можна кілька), потім напиши *ГОТОВО*\n"
+        "4) Натисни *✅ Опублікувати* — оголошення піде у вашу групу\n\n"
+        "Якщо бот не публікує — перевір, що він *адмін у групі* ✅",
+        parse_mode="Markdown",
+        reply_markup=main_menu_kb()
+    )
+
+
+@dp.message(F.text == "🔍 Шукаю житло")
+async def looking(message: Message):
+    await message.answer(
+        "🔍 Напиши в групі, що саме шукаєш (місто/район, бюджет, тип житла).\n"
+        "Або натисни *🏠 Пропоную житло*, якщо хочеш опублікувати пропозицію.",
+        parse_mode="Markdown",
+        reply_markup=main_menu_kb()
+    )
+
+
+@dp.message(F.text == "🏠 Пропоную житло")
+async def start_offer(message: Message, state: FSMContext):
+    reset_offer(message.from_user.id)
     await state.set_state(OfferFlow.category)
-    await c.message.answer("Оберіть тип житла:", reply_markup=kb_category())
-    await c.answer()
+    await message.answer("Обери категорію:", reply_markup=main_menu_kb())
+    await message.answer("👇", reply_markup=kb_offer_category())
 
-@dp.callback_query(OfferFlow.category, F.data.startswith("cat_"))
-async def offer_category(c: CallbackQuery, state: FSMContext):
-    o = get_offer(c.from_user.id)
-    mapping = {
-        "cat_room": "Кімната",
-        "cat_studio": "Студія",
-        "cat_flat": "Квартира",
-        "cat_house": "Будинок",
-    }
-    o.category = mapping.get(c.data, c.data)
-    await state.set_state(OfferFlow.street)
-    await c.message.answer("Вкажіть вулицю/локацію (текст):")
-    await c.answer()
 
-@dp.message(OfferFlow.street)
-async def offer_street(m: Message, state: FSMContext):
-    o = get_offer(m.from_user.id)
-    o.street = (m.text or "").strip()
-    await state.set_state(OfferFlow.district)
-    await m.answer("Оберіть район:", reply_markup=kb_district())
+# ----------------------------
+# Navigation callbacks
+# ----------------------------
+@dp.callback_query(F.data == "nav:home")
+async def nav_home(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    reset_offer(cb.from_user.id)
+    await cb.message.answer("Головне меню 👇", reply_markup=main_menu_kb())
+    await cb.answer()
 
-@dp.callback_query(OfferFlow.district, F.data.startswith("dist_"))
-async def offer_district(c: CallbackQuery, state: FSMContext):
-    if c.data == "dist_other":
-        await c.message.answer("Впишіть район своїми словами:")
-        await c.answer()
-        return
-    o = get_offer(c.from_user.id)
-    mapping = {"dist_center": "Центр", "dist_old": "Старе Місто", "dist_petrzalka": "Петржалка"}
-    o.district = mapping.get(c.data, c.data)
-    await state.set_state(OfferFlow.perks)
-    await c.message.answer("Опишіть переваги (текст):")
-    await c.answer()
 
-@dp.message(OfferFlow.district)
-async def offer_district_text(m: Message, state: FSMContext):
-    o = get_offer(m.from_user.id)
-    o.district = (m.text or "").strip()
-    await state.set_state(OfferFlow.perks)
-    await m.answer("Опишіть переваги (текст):")
+@dp.callback_query(F.data == "nav:cat")
+async def nav_cat(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(OfferFlow.category)
+    await cb.message.answer("Обери категорію:", reply_markup=kb_offer_category())
+    await cb.answer()
 
-@dp.message(OfferFlow.perks)
-async def offer_perks(m: Message, state: FSMContext):
-    o = get_offer(m.from_user.id)
-    o.perks = (m.text or "").strip()
-    await state.set_state(OfferFlow.rent)
-    await m.answer("Ціна оренди (напр. 750€ / міс):")
 
-@dp.message(OfferFlow.rent)
-async def offer_rent(m: Message, state: FSMContext):
-    o = get_offer(m.from_user.id)
-    o.rent = (m.text or "").strip()
-    await state.set_state(OfferFlow.deposit)
-    await m.answer("Депозит (сума/умови):")
-
-@dp.message(OfferFlow.deposit)
-async def offer_deposit(m: Message, state: FSMContext):
-    o = get_offer(m.from_user.id)
-    o.deposit = (m.text or "").strip()
-    await state.set_state(OfferFlow.commission)
-    await m.answer("Комісія (сума/умови):")
-
-@dp.message(OfferFlow.commission)
-async def offer_commission(m: Message, state: FSMContext):
-    o = get_offer(m.from_user.id)
-    o.commission = (m.text or "").strip()
-    await state.set_state(OfferFlow.parking)
-    await m.answer("Парковка є?", reply_markup=kb_yes_no("park"))
-
-@dp.callback_query(OfferFlow.parking, F.data.in_(["park_yes", "park_no"]))
-async def offer_parking(c: CallbackQuery, state: FSMContext):
-    o = get_offer(c.from_user.id)
-    o.parking = "Є" if c.data == "park_yes" else "Немає"
-    await state.set_state(OfferFlow.move_in)
-    await c.message.answer("Коли можна заселятися?", reply_markup=kb_move_in())
-    await c.answer()
-
-@dp.callback_query(OfferFlow.move_in, F.data.in_(["move_now", "move_date", "move_agree"]))
-async def offer_move_in_choice(c: CallbackQuery, state: FSMContext):
-    o = get_offer(c.from_user.id)
-    if c.data == "move_now":
-        o.move_in = "Одразу"
-        await state.set_state(OfferFlow.viewings)
-        await c.message.answer("Коли можливі перегляди? (текст)")
-    elif c.data == "move_agree":
-        o.move_in = "За домовленістю"
-        await state.set_state(OfferFlow.viewings)
-        await c.message.answer("Коли можливі перегляди? (текст)")
-    else:
-        await c.message.answer("Впишіть дату/умову заселення (текст):")
-        # залишаємося в OfferFlow.move_in, але приймемо текстом
-    await c.answer()
-
-@dp.message(OfferFlow.move_in)
-async def offer_move_in_text(m: Message, state: FSMContext):
-    o = get_offer(m.from_user.id)
-    o.move_in = (m.text or "").strip()
-    await state.set_state(OfferFlow.viewings)
-    await m.answer("Коли можливі перегляди? (текст)")
-
-@dp.message(OfferFlow.viewings)
-async def offer_viewings(m: Message, state: FSMContext):
-    o = get_offer(m.from_user.id)
-    o.viewings = (m.text or "").strip()
-    await state.set_state(OfferFlow.contact)
-    await m.answer("Контакт (імʼя + телефон/telegram):")
-
-@dp.message(OfferFlow.contact)
-async def offer_contact(m: Message, state: FSMContext):
-    o = get_offer(m.from_user.id)
-    o.contact = (m.text or "").strip()
-    await state.set_state(OfferFlow.photos_decision)
-    await m.answer("Додати фото?", reply_markup=kb_yes_no("photos"))
-
-@dp.callback_query(OfferFlow.photos_decision, F.data.in_(["photos_yes", "photos_no"]))
-async def offer_photos_decision(c: CallbackQuery, state: FSMContext):
-    if c.data == "photos_no":
-        await state.set_state(OfferFlow.confirm)
-        o = get_offer(c.from_user.id)
-        await c.message.answer(offer_text(o), parse_mode="Markdown", reply_markup=kb_confirm())
-        await c.answer()
-        return
-
+@dp.callback_query(F.data == "nav:photos")
+async def nav_photos(cb: CallbackQuery, state: FSMContext):
     await state.set_state(OfferFlow.photos_collect)
-    await c.message.answer("Надішліть фото (можна кілька). Коли закінчите — напишіть: ГОТОВО")
-    await c.answer()
+    await cb.message.answer("Надішли фото (можна кілька). Коли закінчиш — напиши *ГОТОВО*.", parse_mode="Markdown")
+    await cb.answer()
+
+
+# ----------------------------
+# Offer flow
+# ----------------------------
+@dp.callback_query(OfferFlow.category, F.data.startswith("offer_cat:"))
+async def pick_category(cb: CallbackQuery, state: FSMContext):
+    o = get_offer(cb.from_user.id)
+    o.category = cb.data.split(":", 1)[1]
+    await state.set_state(OfferFlow.property_type)
+    await cb.message.answer(f"Категорія: *{o.category}*\nТепер обери тип:", parse_mode="Markdown")
+    await cb.message.answer("👇", reply_markup=kb_property_type())
+    await cb.answer()
+
+
+@dp.callback_query(OfferFlow.property_type, F.data.startswith("offer_type:"))
+async def pick_type(cb: CallbackQuery, state: FSMContext):
+    o = get_offer(cb.from_user.id)
+    o.property_type = cb.data.split(":", 1)[1]
+    await state.set_state(OfferFlow.city_area)
+    await cb.message.answer(f"Тип: *{o.property_type}*\n\nВведи *місто / район* (наприклад: Київ, Оболонь):", parse_mode="Markdown")
+    await cb.answer()
+
+
+@dp.message(OfferFlow.city_area, F.text)
+async def set_city_area(message: Message, state: FSMContext):
+    o = get_offer(message.from_user.id)
+    o.city_area = message.text.strip()
+    await state.set_state(OfferFlow.address)
+    await message.answer("Введи адресу (або приблизно, без персональних даних):")
+
+
+@dp.message(OfferFlow.address, F.text)
+async def set_address(message: Message, state: FSMContext):
+    o = get_offer(message.from_user.id)
+    o.address = message.text.strip()
+    await state.set_state(OfferFlow.price)
+    await message.answer("Введи ціну (наприклад: 500€/міс або 120000$):")
+
+
+@dp.message(OfferFlow.price, F.text)
+async def set_price(message: Message, state: FSMContext):
+    o = get_offer(message.from_user.id)
+    o.price = message.text.strip()
+    await state.set_state(OfferFlow.contact)
+    await message.answer("Введи контакт (телефон або @username):")
+
+
+@dp.message(OfferFlow.contact, F.text)
+async def set_contact(message: Message, state: FSMContext):
+    o = get_offer(message.from_user.id)
+    o.contact = message.text.strip()
+    await state.set_state(OfferFlow.notes)
+    await message.answer("Додай коментар (умови, кількість кімнат, тварини, комунальні тощо) або напиши '-' щоб пропустити:")
+
+
+@dp.message(OfferFlow.notes, F.text)
+async def set_notes(message: Message, state: FSMContext):
+    o = get_offer(message.from_user.id)
+    txt = message.text.strip()
+    o.notes = None if txt == "-" else txt
+    await state.set_state(OfferFlow.photos_collect)
+    await message.answer("Надішли фото (можна кілька). Коли закінчиш — напиши *ГОТОВО*.", parse_mode="Markdown")
+
 
 @dp.message(OfferFlow.photos_collect, F.photo)
-async def offer_photos_collect(m: Message, state: FSMContext):
-    o = get_offer(m.from_user.id)
-    o.photos.append(m.photo[-1].file_id)
-    await m.answer(f"✅ Додано фото. Всього: {len(o.photos)}. Надішліть ще або напишіть ГОТОВО.")
+async def photos_collect(message: Message, state: FSMContext):
+    o = get_offer(message.from_user.id)
+    o.photos.append(message.photo[-1].file_id)
+    await message.answer(f"✅ Фото додано ({len(o.photos)}). Надішли ще або напиши *ГОТОВО*.", parse_mode="Markdown")
+
 
 @dp.message(OfferFlow.photos_collect, F.text.casefold() == "готово")
-async def offer_photos_done(m: Message, state: FSMContext):
+async def photos_done(message: Message, state: FSMContext):
+    o = get_offer(message.from_user.id)
     await state.set_state(OfferFlow.confirm)
-    o = get_offer(m.from_user.id)
-    await m.answer(offer_text(o), parse_mode="Markdown", reply_markup=kb_confirm())
-            
+    await message.answer("Перевір оголошення 👇", reply_markup=main_menu_kb())
+    await message.answer(format_offer(o), parse_mode="Markdown", reply_markup=kb_confirm())
+
+
+@dp.message(OfferFlow.photos_collect, F.text)
+async def photos_collect_text(message: Message, state: FSMContext):
+    # user wrote something else while in photos state
+    await message.answer("Надішли фото або напиши *ГОТОВО*.", parse_mode="Markdown")
+
+
+@dp.callback_query(OfferFlow.confirm, F.data.startswith("offer_confirm:"))
+async def confirm_offer(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    action = cb.data.split(":", 1)[1]
+    o = get_offer(cb.from_user.id)
+
+    if action == "cancel":
+        await state.clear()
+        reset_offer(cb.from_user.id)
+        await cb.message.answer("❌ Скасовано. Повертаю в меню.", reply_markup=main_menu_kb())
+        await cb.answer()
+        return
+
+    # publish
+    text = format_offer(o)
+
+    try:
+        if o.photos:
+            # send album first (up to 10 per media group)
+            media = [InputMediaPhoto(media=pid) for pid in o.photos[:10]]
+            await bot.send_media_group(chat_id=GROUP_ID, media=media)
+            await bot.send_message(chat_id=GROUP_ID, text=text, parse_mode="Markdown")
+        else:
+            await bot.send_message(chat_id=GROUP_ID, text=text, parse_mode="Markdown")
+
+        await cb.message.answer("✅ Опубліковано в групу!", reply_markup=main_menu_kb())
+    except Exception as e:
+        await cb.message.answer(
+            "❌ Не зміг опублікувати в групу.\n"
+            "Перевір:\n"
+            "1) бот є *адміном* у групі\n"
+            "2) GROUP_ID правильний\n\n"
+            f"Помилка: {type(e).__name__}: {e}",
+            parse_mode="Markdown",
+            reply_markup=main_menu_kb()
+        )
+
+    await state.clear()
+    reset_offer(cb.from_user.id)
+    await cb.answer()
+
+
+# ----------------------------
+# Fallback: unknown messages
+# ----------------------------
+@dp.message()
+async def fallback(message: Message):
+    await message.answer("Обери дію з меню 👇", reply_markup=main_menu_kb())
+
+
+# ----------------------------
+# Entrypoint
+# ----------------------------
+async def main():
+    bot = Bot(BOT_TOKEN)
+
+    # If webhook was set earlier, remove it so polling works
+    await bot.delete_webhook(drop_pending_updates=True)
+
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
