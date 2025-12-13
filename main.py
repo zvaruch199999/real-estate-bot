@@ -290,6 +290,8 @@ async def offer_photos_collect(m: Message, state: FSMContext):
     o.photos.append(m.photo[-1].file_id)
     await m.answer(f"✅ Додано фото. Всього: {len(o.photos)}. Надішліть ще або напишіть ГОТОВО.")
 
-@dp.message(OfferFlow.photos_collect,)
+@dp.message(OfferFlow.photos_collect)
+async def photos_collect(message: Message, state: FSMContext):
+    ...
 
             
