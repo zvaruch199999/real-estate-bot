@@ -1,18 +1,38 @@
-CREATE TABLE IF NOT EXISTS offers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at TEXT NOT NULL,
-    category TEXT,
-    street TEXT,
-    district TEXT,
-    advantages TEXT,
-    rent TEXT,
-    deposit TEXT,
-    commission TEXT,
-    parking TEXT,
-    move_in TEXT,
-    views TEXT,
-    realtor TEXT,
-    photos TEXT,
-    status TEXT DEFAULT 'АКТУАЛЬНА',
-    group_message_id INTEGER
-)
+import sqlite3
+from datetime import datetime
+
+DB_PATH = "offers.db"
+
+def get_db():
+    return sqlite3.connect(DB_PATH)
+
+def init_db():
+    con = get_db()
+    cur = con.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS offers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            title TEXT,
+            status TEXT DEFAULT 'АКТУАЛЬНА'
+        )
+    """)
+
+    con.commit()
+    con.close()
+
+def insert_offer(title: str):
+    con = get_db()
+    cur = con.cursor()
+
+    cur.execute("""
+        INSERT INTO offers (created_at, title)
+        VALUES (?, ?)
+    """, (
+        datetime.utcnow().isoformat(),
+        title
+    ))
+
+    con.commit()
+    con.close()
