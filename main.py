@@ -32,6 +32,19 @@ bot = Bot(
 
 dp = Dispatcher(storage=MemoryStorage())
 
+def render_preview(data: dict) -> str:
+    status_map = {
+        "active": "🟢 АКТУАЛЬНА",
+        "reserved": "🟡 РЕЗЕРВОВАНА",
+        "inactive": "🔴 НЕАКТУАЛЬНА",
+    }
+
+    return (
+        "<b>🏠 Нова пропозиція</b>\n\n"
+        f"<b>Тип:</b> {data.get('category','')}\n"
+        f"<b>Вулиця:</b> {data.get('street','')}\n"
+        f"<b>Статус:</b> {status_map.get(data.get('status'))}"
+    )
 
 @dp.message(CommandStart())
 async def start(message: Message):
