@@ -19,7 +19,8 @@ def category_kb():
 
 def status_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 АКТУАЛЬНА", callback_data="status:АКТУАЛЬНА")],
-        [InlineKeyboardButton(text="🟡 РЕЗЕРВОВАНА", callback_data="status:РЕЗЕРВОВАНА")],
-        [InlineKeyboardButton(text="🔴 НЕАКТУАЛЬНА", callback_data="status:НЕАКТУАЛЬНА")]
+        [InlineKeyboardButton(text="🟢 АКТУАЛЬНА", callback_data="status:active")],
+        [InlineKeyboardButton(text="🟡 РЕЗЕРВОВАНА", callback_data="status:reserved")],
+        [InlineKeyboardButton(text="🔴 НЕАКТУАЛЬНА", callback_data="status:inactive")]
     ])
+
