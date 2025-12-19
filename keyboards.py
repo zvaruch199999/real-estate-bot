@@ -29,3 +29,21 @@ def confirm_kb():
         [InlineKeyboardButton(text="✅ Опублікувати", callback_data="confirm:yes")],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="confirm:no")]
     ])
+
+def post_status_kb(offer_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🟢 АКТУАЛЬНА",
+                callback_data=f"post_status:{offer_id}:АКТУАЛЬНА"
+            ),
+            InlineKeyboardButton(
+                text="🟡 РЕЗЕРВОВАНА",
+                callback_data=f"post_status:{offer_id}:РЕЗЕРВОВАНА"
+            ),
+            InlineKeyboardButton(
+                text="🔴 НЕАКТУАЛЬНА",
+                callback_data=f"post_status:{offer_id}:НЕАКТУАЛЬНА"
+            ),
+        ]
+    ])
