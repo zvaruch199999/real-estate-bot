@@ -9,7 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from db import init_db
+from db import init_db, create_offer
 from states import OfferFlow
 from keyboards import start_kb, category_kb, status_kb, confirm_kb
 
