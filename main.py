@@ -69,7 +69,13 @@ async def category_step(call: CallbackQuery, state: FSMContext):
 async def street_step(message: Message, state: FSMContext):
     await state.update_data(street=message.text)
     await state.set_state(OfferFlow.district)
-    await message.answer("Вкажіть район:")
+    await message.answer("В якому районі житло?")
+
+@dp.message(OfferFlow.district)
+async def district_step(message: Message, state: FSMContext):
+    await state.update_data(district=message.text)
+    await state.set_state(OfferFlow.advantages)
+    await message.answer("Напишіть переваги житла (через кому):")
 
 
 @dp.message(OfferFlow.district)
