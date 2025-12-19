@@ -1,0 +1,18 @@
+CREATE TABLE IF NOT EXISTS offers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    category TEXT,
+    street TEXT,
+    district TEXT,
+    advantages TEXT,
+    rent TEXT,
+    deposit TEXT,
+    commission TEXT,
+    parking TEXT,
+    move_in TEXT,
+    views TEXT,
+    realtor TEXT,
+    photos TEXT,
+    status TEXT DEFAULT 'АКТУАЛЬНА',
+    group_message_id INTEGER
+)
