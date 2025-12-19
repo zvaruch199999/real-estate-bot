@@ -1,514 +1,457 @@
 import os
-from typing import List, Optional
+import logging
+import asyncio
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    InputMediaPhoto,
 )
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
-GROUP_ID = (os.getenv("GROUP_ID") or "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GROUP_ID = os.getenv("GROUP_ID")
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN missing. Set it in Render Environment Variables.")
-if " " in BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN contains spaces. Copy token again from @BotFather.")
+    raise RuntimeError("BOT_TOKEN is missing in env")
 if not GROUP_ID:
-    raise RuntimeError("GROUP_ID missing. Set it in Render Environment Variables.")
+    raise RuntimeError("GROUP_ID is missing in env")
+GROUP_ID = int(GROUP_ID)
 
-GROUP_ID_INT = int(GROUP_ID)
+logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher()
+
+# --------- Bratislava districts (all city parts) ----------
+BRATISLAVA_DISTRICTS = [
+    "Staré Mesto",
+    "Ružinov",
+    "Nové Mesto",
+    "Petržalka",
+    "Karlova Ves",
+    "Dúbravka",
+    "Lamač",
+    "Devínska Nová Ves",
+    "Devín",
+    "Záhorská Bystrica",
+    "Vajnory",
+    "Rača",
+    "Vrakuňa",
+    "Podunajské Biskupice",
+    "Jarovce",
+    "Rusovce",
+    "Čunovo",
+]
+
+# --------- In-memory storage (simple) ----------
+# offer_id -> {"data":..., "group_msg_id": int}
+OFFERS = {}
+# user_id -> {"photos": [file_id,...], "data": {...}}
+USER_TEMP = {}
+
+def now_str():
+    return datetime.now().strftime("%d.%m.%Y %H:%M")
 
 
-# ---------------- Keyboards ----------------
+# --------- Helpers ----------
 def kb_main() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🏠 Я пропоную житло", callback_data="offer_start")],
-            [InlineKeyboardButton(text="🔎 Я шукаю житло", callback_data="search_start")],
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 Я ПРОПОНУЮ ЖИТЛО", callback_data="menu:offer")],
+        [InlineKeyboardButton(text="🔎 Я ШУКАЮ ЖИТЛО", callback_data="menu:search")],
+    ])
+
+def kb_categories() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(text="🛏 Ліжко", callback_data="cat:Ліжко"),
+            InlineKeyboardButton(text="🚪 Кімната", callback_data="cat:Кімната"),
+        ],
+        [
+            InlineKeyboardButton(text="🏢 Студія", callback_data="cat:Студія"),
+            InlineKeyboardButton(text="🏠 Квартира", callback_data="cat:Квартира"),
+        ],
+        [
+            InlineKeyboardButton(text="🏡 Дім", callback_data="cat:Дім"),
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:back"),
         ]
-    )
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
-def kb_offer_category() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🛏 Ліжко", callback_data="cat_bed"),
-                InlineKeyboardButton(text="🛌 Кімната", callback_data="cat_room"),
-            ],
-            [
-                InlineKeyboardButton(text="🏢 Студіо", callback_data="cat_studio"),
-                InlineKeyboardButton(text="🏬 Квартира", callback_data="cat_flat"),
-            ],
-            [InlineKeyboardButton(text="🏡 Дім", callback_data="cat_house")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")],
+def kb_yes_no(prefix: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Так", callback_data=f"{prefix}:yes"),
+            InlineKeyboardButton(text="Ні", callback_data=f"{prefix}:no"),
         ]
-    )
+    ])
 
+def kb_districts(page: int = 0, per_page: int = 6) -> InlineKeyboardMarkup:
+    start = page * per_page
+    end = start + per_page
+    items = BRATISLAVA_DISTRICTS[start:end]
 
-def kb_district() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Центр", callback_data="dist_center"),
-                InlineKeyboardButton(text="Старе Місто", callback_data="dist_oldtown"),
-            ],
-            [
-                InlineKeyboardButton(text="Петржалка", callback_data="dist_petrzalka"),
-                InlineKeyboardButton(text="Інше (дописати)", callback_data="dist_other"),
-            ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="offer_back_category")],
+    rows = [[InlineKeyboardButton(text=d, callback_data=f"dist:{d}")] for d in items]
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"distpage:{page-1}"))
+    if end < len(BRATISLAVA_DISTRICTS):
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"distpage:{page+1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton(text="✍️ Інший район", callback_data="dist:custom")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dist:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_photos_done() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Готово (фото)", callback_data="photos:done")],
+        [InlineKeyboardButton(text="⏭ Пропустити фото", callback_data="photos:skip")],
+    ])
+
+def kb_confirm() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Опублікувати", callback_data="confirm:publish"),
+            InlineKeyboardButton(text="❌ Скасувати", callback_data="confirm:cancel"),
         ]
-    )
+    ])
 
-
-def kb_move_in() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⚡️ Одразу", callback_data="move_now")],
-            [InlineKeyboardButton(text="📅 Від дати (написати)", callback_data="move_from_date")],
-            [InlineKeyboardButton(text="✍️ Свій варіант (написати)", callback_data="move_custom")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="offer_back_parking")],
+def kb_offer_admin(offer_id: str) -> InlineKeyboardMarkup:
+    # no SMS / no ХОЧУ
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Резерв", callback_data=f"adm:reserve:{offer_id}"),
+            InlineKeyboardButton(text="🟡 Здано", callback_data=f"adm:rented:{offer_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="♻️ Актив", callback_data=f"adm:active:{offer_id}"),
+            InlineKeyboardButton(text="❌ Видалити", callback_data=f"adm:delete:{offer_id}"),
         ]
-    )
+    ])
+
+async def is_group_admin(user_id: int) -> bool:
+    admins = await bot.get_chat_administrators(GROUP_ID)
+    return any(a.user.id == user_id for a in admins)
+
+def compact_offer_text(data: dict, status: str = "АКТИВНА") -> str:
+    # Menšie rozstupy: minimum prázdnych riadkov
+    parts = []
+    parts.append(f"📌 STAV: {status}")
+    parts.append(f"🏠 Оренда {data['category']} у Братиславі")
+    parts.append(f"📍 Вул.: {data['address']}")
+    parts.append(f"🗺 Район: {data['district']}")
+    parts.append(f"✨ Переваги: {data['advantages']}")
+    parts.append(f"💶 Оренда (з комуналкою): {data['rent']}")
+    parts.append(f"💰 Депозит: {data['deposit']}")
+    parts.append(f"🧾 Комісія: {data['commission']}")
+    parts.append(f"🅿️ Паркування: {data['parking']}")
+    parts.append(f"🐾 Улюбленець: {data['pets']}")
+    parts.append(f"📅 Заселення від: {data['move_in']}")
+    parts.append(f"👀 Огляди від: {data['viewing']}")
+    parts.append(f"ℹ️ Деталі: {data['details']}")
+    parts.append(f"👤 Маклер: Олександр")
+    return "\n".join(parts)
+
+def new_offer_id(user_id: int) -> str:
+    return f"{user_id}_{int(datetime.now().timestamp())}"
 
 
-def kb_realtor() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Антон", callback_data="rel_anton"),
-                InlineKeyboardButton(text="Юрій", callback_data="rel_yuriy"),
-            ],
-            [
-                InlineKeyboardButton(text="Олександра", callback_data="rel_oleksandra"),
-                InlineKeyboardButton(text="Ангеліна", callback_data="rel_angelina"),
-            ],
-            [InlineKeyboardButton(text="Лілі", callback_data="rel_lili")],
-            [InlineKeyboardButton(text="✍️ Інше (написати)", callback_data="rel_other")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="offer_back_viewings")],
-        ]
-    )
-
-
-def kb_photos() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📷 Маю фото", callback_data="photos_yes"),
-                InlineKeyboardButton(text="🚫 Немає", callback_data="photos_no"),
-            ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="offer_back_realtor")],
-        ]
-    )
-
-
-def kb_preview() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Опублікувати в групу", callback_data="publish")],
-            [InlineKeyboardButton(text="✏️ Є помилка — повернутись", callback_data="fix")],
-            [InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_main")],
-        ]
-    )
-
-
-def kb_post_actions(details_link: str, phone_link: Optional[str]) -> InlineKeyboardMarkup:
-    row = [InlineKeyboardButton(text="💬 SMS", url=details_link)]
-    if phone_link:
-        row.append(InlineKeyboardButton(text="📞 Дзвінок", url=phone_link))
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            row,
-            [InlineKeyboardButton(text="🙋 ХОЧУ", callback_data="i_want")],
-        ]
-    )
-
-
-# ---------------- FSM ----------------
+# --------- FSM ----------
 class OfferFlow(StatesGroup):
     category = State()
-    street = State()
+    address = State()
     district = State()
-    district_other = State()
+    district_custom = State()
     advantages = State()
     rent = State()
     deposit = State()
     commission = State()
     parking = State()
+    pets = State()
     move_in = State()
-    move_in_text = State()
-    viewings = State()
-    realtor = State()
-    realtor_other = State()
-    realtor_contact = State()
-    photos_choice = State()
-    photos_collect = State()
+    viewing = State()
+    details = State()
+    photos = State()
     confirm = State()
 
 
-CATEGORY_MAP = {
-    "cat_bed": "ліжко",
-    "cat_room": "кімната",
-    "cat_studio": "студіо",
-    "cat_flat": "квартира",
-    "cat_house": "дім",
-}
-
-DISTRICT_MAP = {
-    "dist_center": "Центр",
-    "dist_oldtown": "Старе Місто",
-    "dist_petrzalka": "Петржалка",
-}
-
-
-def contact_to_links(contact: str):
-    c = (contact or "").strip()
-    phone_link = None
-    details_link = None
-
-    if c.startswith("@"):
-        details_link = f"https://t.me/{c[1:]}"
-    elif c.startswith("http://") or c.startswith("https://"):
-        details_link = c
-    else:
-        details_link = c
-        digits = "".join(ch for ch in c if ch.isdigit() or ch == "+")
-        if len(digits) >= 9:
-            phone_link = f"tel:{digits}"
-
-    if not details_link:
-        details_link = "https://t.me/"
-    return details_link, phone_link
-
-
-def format_offer_text(data: dict) -> str:
-    lines = []
-    lines.append(f"🏠 Оренда: {data.get('category','')}")
-    lines.append(f"📍 Адреса: {data.get('street','')} ({data.get('district','')})")
-    lines.append("")
-    lines.append(f"✨ Переваги проживання: {data.get('advantages','')}")
-    lines.append("")
-    lines.append(f"💶 Оренда: {data.get('rent','')}")
-    lines.append(f"🔒 Депозит: {data.get('deposit','')}")
-    lines.append(f"🤝 Комісія: {data.get('commission','')}")
-    lines.append("")
-    lines.append(f"🅿️ Паркінг: {data.get('parking','')}")
-    lines.append(f"📦 Заселення від: {data.get('move_in','')}")
-    lines.append(f"👀 Огляди від: {data.get('viewings','')}")
-    lines.append("")
-    lines.append(f"👤 Маклер: {data.get('realtor_name','')}")
-    lines.append(f"🔗 Деталі: {data.get('realtor_contact','')}")
-    return "\n".join(lines).strip()
-
-
-# ---------------- Handlers ----------------
+# --------- Handlers ----------
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Привіт! Обери дію 👇", reply_markup=kb_main())
+    await message.answer("Привіт! Обери дію:", reply_markup=kb_main())
 
-
-@dp.callback_query(F.data == "back_to_main")
-async def back_to_main(call: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "menu:back")
+async def menu_back(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text("Головне меню 👇", reply_markup=kb_main())
+    await call.message.edit_text("Обери дію:", reply_markup=kb_main())
     await call.answer()
 
-
-@dp.callback_query(F.data == "search_start")
-async def search_start(call: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await call.answer()
-    await call.message.edit_text(
-        "🔎 Пошук житла — додамо наступним кроком.\n"
-        "Зараз працює гілка «Я пропоную житло».",
-        reply_markup=kb_main(),
-    )
-
-
-# ---------- Offer flow ----------
-@dp.callback_query(F.data == "offer_start")
-async def offer_start(call: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "menu:offer")
+async def menu_offer(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(OfferFlow.category)
+    await call.message.edit_text("Оберіть категорію:", reply_markup=kb_categories())
     await call.answer()
-    await call.message.edit_text("Обери категорію житла 👇", reply_markup=kb_offer_category())
 
-
-@dp.callback_query(F.data == "offer_back_category")
-async def offer_back_category(call: CallbackQuery, state: FSMContext):
-    await state.set_state(OfferFlow.category)
+@dp.callback_query(F.data == "menu:search")
+async def menu_search(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("Поки що робимо гілку «Пропоную житло». Потім доробимо «Шукаю житло».", reply_markup=kb_main())
     await call.answer()
-    await call.message.edit_text("Обери категорію житла 👇", reply_markup=kb_offer_category())
 
-
-@dp.callback_query(F.data.startswith("cat_"))
-async def offer_category(call: CallbackQuery, state: FSMContext):
-    if await state.get_state() != OfferFlow.category.state:
-        await call.answer()
-        return
-    await state.update_data(category=CATEGORY_MAP.get(call.data, ""))
-    await state.set_state(OfferFlow.street)
+@dp.callback_query(F.data.startswith("cat:"))
+async def cat_pick(call: CallbackQuery, state: FSMContext):
+    category = call.data.split(":", 1)[1]
+    await state.update_data(category=category)
+    await state.set_state(OfferFlow.address)
+    await call.message.edit_text("Напишіть вулицю/адресу проживання (текстом):")
     await call.answer()
-    await call.message.edit_text("Напиши вулицю / адресу проживання ✍️")
 
-
-@dp.message(OfferFlow.street)
-async def offer_street(message: Message, state: FSMContext):
-    await state.update_data(street=message.text.strip())
+@dp.message(OfferFlow.address)
+async def address_in(message: Message, state: FSMContext):
+    await state.update_data(address=message.text.strip())
     await state.set_state(OfferFlow.district)
-    await message.answer("В якому районі житло? 👇", reply_markup=kb_district())
+    await message.answer("В якому районі житло?", reply_markup=kb_districts(page=0))
 
+@dp.callback_query(F.data.startswith("distpage:"))
+async def dist_page(call: CallbackQuery, state: FSMContext):
+    page = int(call.data.split(":", 1)[1])
+    await call.message.edit_reply_markup(reply_markup=kb_districts(page=page))
+    await call.answer()
 
-@dp.callback_query(F.data.startswith("dist_"))
-async def offer_district(call: CallbackQuery, state: FSMContext):
-    if call.data == "dist_other":
-        await state.set_state(OfferFlow.district_other)
+@dp.callback_query(F.data == "dist:back")
+async def dist_back(call: CallbackQuery, state: FSMContext):
+    await state.set_state(OfferFlow.address)
+    await call.message.edit_text("Напишіть вулицю/адресу проживання (текстом):")
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("dist:"))
+async def dist_pick(call: CallbackQuery, state: FSMContext):
+    val = call.data.split(":", 1)[1]
+    if val == "custom":
+        await state.set_state(OfferFlow.district_custom)
+        await call.message.edit_text("Напишіть район (власним текстом):")
         await call.answer()
-        await call.message.edit_text("Напиши район (свій варіант) ✍️")
         return
 
-    await state.update_data(district=DISTRICT_MAP.get(call.data, ""))
+    await state.update_data(district=val)
     await state.set_state(OfferFlow.advantages)
+    await call.message.edit_text("Напишіть переваги житла (текстом):")
     await call.answer()
-    await call.message.edit_text("Напиши переваги житла ✨")
 
-
-@dp.message(OfferFlow.district_other)
-async def offer_district_other(message: Message, state: FSMContext):
+@dp.message(OfferFlow.district_custom)
+async def district_custom_in(message: Message, state: FSMContext):
     await state.update_data(district=message.text.strip())
     await state.set_state(OfferFlow.advantages)
-    await message.answer("Напиши переваги житла ✨")
-
+    await message.answer("Напишіть переваги житла (текстом):")
 
 @dp.message(OfferFlow.advantages)
-async def offer_advantages(message: Message, state: FSMContext):
+async def advantages_in(message: Message, state: FSMContext):
     await state.update_data(advantages=message.text.strip())
     await state.set_state(OfferFlow.rent)
-    await message.answer("Яка оренда з комуналкою? 💶 (наприклад: 700€ + комунальні)")
-
+    await message.answer("Яка оренда з комуналкою? (наприклад: 750€)")
 
 @dp.message(OfferFlow.rent)
-async def offer_rent(message: Message, state: FSMContext):
+async def rent_in(message: Message, state: FSMContext):
     await state.update_data(rent=message.text.strip())
     await state.set_state(OfferFlow.deposit)
-    await message.answer("В якій сумі депозит? 🔒")
-
+    await message.answer("В якій сумі депозит?")
 
 @dp.message(OfferFlow.deposit)
-async def offer_deposit(message: Message, state: FSMContext):
+async def deposit_in(message: Message, state: FSMContext):
     await state.update_data(deposit=message.text.strip())
     await state.set_state(OfferFlow.commission)
-    await message.answer("Яка комісія? 🤝")
-
+    await message.answer("Яка комісія?")
 
 @dp.message(OfferFlow.commission)
-async def offer_commission(message: Message, state: FSMContext):
+async def commission_in(message: Message, state: FSMContext):
     await state.update_data(commission=message.text.strip())
     await state.set_state(OfferFlow.parking)
-    await message.answer("Паркінг? 🅿️ (напиши текстом: є/нема/ціна/умови)")
+    await message.answer("Є паркування?", reply_markup=kb_yes_no("parking"))
 
-
-@dp.callback_query(F.data == "offer_back_parking")
-async def offer_back_parking(call: CallbackQuery, state: FSMContext):
-    await state.set_state(OfferFlow.parking)
+@dp.callback_query(F.data.startswith("parking:"))
+async def parking_in(call: CallbackQuery, state: FSMContext):
+    ans = "Так" if call.data.endswith("yes") else "Ні"
+    await state.update_data(parking=ans)
+    await state.set_state(OfferFlow.pets)
+    await call.message.edit_text("Дозволено з улюбленцем?", reply_markup=kb_yes_no("pets"))
     await call.answer()
-    await call.message.edit_text("Паркінг? 🅿️ (напиши текстом: є/нема/ціна/умови)")
 
-
-@dp.message(OfferFlow.parking)
-async def offer_parking(message: Message, state: FSMContext):
-    await state.update_data(parking=message.text.strip())
+@dp.callback_query(F.data.startswith("pets:"))
+async def pets_in(call: CallbackQuery, state: FSMContext):
+    ans = "Так" if call.data.endswith("yes") else "Ні"
+    await state.update_data(pets=ans)
     await state.set_state(OfferFlow.move_in)
-    await message.answer("Заселення від:", reply_markup=kb_move_in())
-
-
-@dp.callback_query(F.data.in_({"move_now", "move_from_date", "move_custom"}))
-async def offer_move_in_choice(call: CallbackQuery, state: FSMContext):
-    if call.data == "move_now":
-        await state.update_data(move_in="Одразу")
-        await state.set_state(OfferFlow.viewings)
-        await call.answer()
-        await call.message.edit_text("Огляди від? 👀 (напиши текстом: коли/час)")
-        return
-
-    # require text input
-    await state.set_state(OfferFlow.move_in_text)
+    await call.message.edit_text("Заселення від (дата/текст):")
     await call.answer()
-    await call.message.edit_text("Напиши дату/умову заселення ✍️")
 
-
-@dp.message(OfferFlow.move_in_text)
-async def offer_move_in_text(message: Message, state: FSMContext):
+@dp.message(OfferFlow.move_in)
+async def move_in_in(message: Message, state: FSMContext):
     await state.update_data(move_in=message.text.strip())
-    await state.set_state(OfferFlow.viewings)
-    await message.answer("Огляди від? 👀 (напиши текстом: коли/час)")
+    await state.set_state(OfferFlow.viewing)
+    await message.answer("Огляди від (дата/текст):")
 
+@dp.message(OfferFlow.viewing)
+async def viewing_in(message: Message, state: FSMContext):
+    await state.update_data(viewing=message.text.strip())
+    await state.set_state(OfferFlow.details)
+    await message.answer("Деталі / контакт (наприклад: @username або телефон):")
 
-@dp.callback_query(F.data == "offer_back_viewings")
-async def offer_back_viewings(call: CallbackQuery, state: FSMContext):
-    await state.set_state(OfferFlow.viewings)
-    await call.answer()
-    await call.message.edit_text("Огляди від? 👀 (напиши текстом: коли/час)")
+@dp.message(OfferFlow.details)
+async def details_in(message: Message, state: FSMContext):
+    await state.update_data(details=message.text.strip())
+    await state.set_state(OfferFlow.photos)
 
-
-@dp.message(OfferFlow.viewings)
-async def offer_viewings(message: Message, state: FSMContext):
-    await state.update_data(viewings=message.text.strip())
-    await state.set_state(OfferFlow.realtor)
-    await message.answer("Хто маклер? 👤", reply_markup=kb_realtor())
-
-
-@dp.callback_query(F.data.startswith("rel_"))
-async def offer_realtor(call: CallbackQuery, state: FSMContext):
-    if call.data == "rel_other":
-        await state.set_state(OfferFlow.realtor_other)
-        await call.answer()
-        await call.message.edit_text("Напиши імʼя маклера ✍️")
-        return
-
-    name_map = {
-        "rel_anton": "Антон",
-        "rel_yuriy": "Юрій",
-        "rel_oleksandra": "Олександра",
-        "rel_angelina": "Ангеліна",
-        "rel_lili": "Лілі",
-    }
-    await state.update_data(realtor_name=name_map.get(call.data, ""))
-    await state.set_state(OfferFlow.realtor_contact)
-    await call.answer()
-    await call.message.edit_text("Напиши контакт маклера: @username або телефон ✍️")
-
-
-@dp.message(OfferFlow.realtor_other)
-async def offer_realtor_other(message: Message, state: FSMContext):
-    await state.update_data(realtor_name=message.text.strip())
-    await state.set_state(OfferFlow.realtor_contact)
-    await message.answer("Напиши контакт маклера: @username або телефон ✍️")
-
-
-@dp.callback_query(F.data == "offer_back_realtor")
-async def offer_back_realtor(call: CallbackQuery, state: FSMContext):
-    await state.set_state(OfferFlow.realtor_contact)
-    await call.answer()
-    await call.message.edit_text("Напиши контакт маклера: @username або телефон ✍️")
-
-
-@dp.message(OfferFlow.realtor_contact)
-async def offer_realtor_contact(message: Message, state: FSMContext):
-    await state.update_data(realtor_contact=message.text.strip())
-    await state.set_state(OfferFlow.photos_choice)
-    await message.answer("Фото є? 📸", reply_markup=kb_photos())
-
-
-@dp.callback_query(F.data.in_({"photos_yes", "photos_no"}))
-async def offer_photos_choice(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    if call.data == "photos_no":
-        await state.update_data(photo_ids=[])
-        await state.set_state(OfferFlow.confirm)
-        data = await state.get_data()
-        await call.message.edit_text("Перевір дані 👇\n\n" + format_offer_text(data), reply_markup=kb_preview())
-        return
-
-    # photos_yes
-    await state.update_data(photo_ids=[])
-    await state.set_state(OfferFlow.photos_collect)
-    await call.message.edit_text(
-        "Надішли фото (можна кілька). Коли закінчиш — напиши: ГОТОВО ✅\n"
-        "Або можеш одразу написати ГОТОВО, якщо передумав."
+    USER_TEMP[message.from_user.id] = {"photos": []}
+    await message.answer(
+        "Можеш надіслати фото (до 6). Коли закінчиш — натисни ✅ Готово.\nАбо пропусти.",
+        reply_markup=kb_photos_done()
     )
 
-
-@dp.message(OfferFlow.photos_collect)
-async def offer_photos_collect(message: Message, state: FSMContext):
-    text = (message.text or "").strip().lower()
-
-    if text in {"готово", "done", "ok", "ок"}:
-        await state.set_state(OfferFlow.confirm)
-        data = await state.get_data()
-        await message.answer("Перевір дані 👇\n\n" + format_offer_text(data), reply_markup=kb_preview())
+@dp.message(OfferFlow.photos, F.photo)
+async def photo_collect(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    USER_TEMP.setdefault(uid, {"photos": []})
+    photos = USER_TEMP[uid]["photos"]
+    if len(photos) >= 6:
+        await message.answer("Вже є 6 фото. Натисни ✅ Готово.")
         return
+    photos.append(message.photo[-1].file_id)
+    await message.answer(f"Фото додано ({len(photos)}/6). Можеш ще або натисни ✅ Готово.")
 
-    if not message.photo:
-        await message.answer("Надішли фото або напиши ГОТОВО ✅")
-        return
-
-    largest = message.photo[-1]
+@dp.callback_query(F.data.in_({"photos:done", "photos:skip"}))
+async def photos_done(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    photo_ids = data.get("photo_ids", [])
-    photo_ids.append(largest.file_id)
-    await state.update_data(photo_ids=photo_ids)
+    uid = call.from_user.id
 
-    await message.answer(f"Фото додано ✅ ({len(photo_ids)})\nНадішли ще або напиши ГОТОВО.")
+    photos = []
+    if call.data == "photos:done":
+        photos = USER_TEMP.get(uid, {}).get("photos", [])
 
+    await state.update_data(_photos=photos)
 
-@dp.callback_query(F.data == "fix")
-async def offer_fix(call: CallbackQuery, state: FSMContext):
-    # Повертаємо на категорію (найпростіше)
-    await state.set_state(OfferFlow.category)
+    preview = compact_offer_text({**data, "details": data.get("details", "")}, status="АКТИВНА")
+    await state.set_state(OfferFlow.confirm)
+
+    # show preview to user
+    await call.message.edit_text("Перевірте текст. Опублікувати?", reply_markup=kb_confirm())
+    # also send preview text (compact)
+    await call.message.answer(preview)
     await call.answer()
-    await call.message.edit_text("Ок, почнемо заново. Обери категорію 👇", reply_markup=kb_offer_category())
 
-
-@dp.callback_query(F.data == "publish")
-async def offer_publish(call: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "confirm:cancel")
+async def confirm_cancel(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("Скасовано. Обери дію:", reply_markup=kb_main())
     await call.answer()
+
+@dp.callback_query(F.data == "confirm:publish")
+async def confirm_publish(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    uid = call.from_user.id
+    offer_id = new_offer_id(uid)
 
-    text = format_offer_text(data)
-    details_link, phone_link = contact_to_links(data.get("realtor_contact", ""))
+    photos = data.get("_photos", [])
+    text = compact_offer_text(data, status="АКТИВНА")
 
-    photo_ids: List[str] = data.get("photo_ids", []) or []
-
-    if photo_ids:
-        # send as album + caption on first photo
-        media = []
-        for i, pid in enumerate(photo_ids[:10]):  # Telegram album limit ~10
-            media.append(InputMediaPhoto(media=pid, caption=text if i == 0 else None))
-        await bot.send_media_group(chat_id=GROUP_ID_INT, media=media)
-        # after album - send action buttons as separate message
-        await bot.send_message(
-            chat_id=GROUP_ID_INT,
-            text="Дії 👇",
-            reply_markup=kb_post_actions(details_link, phone_link),
+    # publish to group
+    if photos:
+        # send first photo with caption, others separately
+        first = photos[0]
+        sent = await bot.send_photo(
+            chat_id=GROUP_ID,
+            photo=first,
+            caption=text,
+            reply_markup=kb_offer_admin(offer_id),
         )
+        for p in photos[1:]:
+            await bot.send_photo(chat_id=GROUP_ID, photo=p)
+        group_msg_id = sent.message_id
     else:
-        await bot.send_message(
-            chat_id=GROUP_ID_INT,
+        sent = await bot.send_message(
+            chat_id=GROUP_ID,
             text=text,
-            reply_markup=kb_post_actions(details_link, phone_link),
+            reply_markup=kb_offer_admin(offer_id),
         )
+        group_msg_id = sent.message_id
+
+    OFFERS[offer_id] = {"data": data, "group_msg_id": group_msg_id}
 
     await state.clear()
-    await call.message.edit_text("✅ Опубліковано в групу! Повертаю в меню 👇", reply_markup=kb_main())
+    await call.message.edit_text("Готово ✅ Опубліковано в групу.", reply_markup=kb_main())
+    await call.answer()
+
+# --------- Admin actions on group message ----------
+@dp.callback_query(F.data.startswith("adm:"))
+async def admin_actions(call: CallbackQuery):
+    # Only group admins can change status (your requirement: "Všetci" -> all admins)
+    if not await is_group_admin(call.from_user.id):
+        await call.answer("Тільки адміни групи можуть змінювати статус.", show_alert=True)
+        return
+
+    _, action, offer_id = call.data.split(":", 2)
+    offer = OFFERS.get(offer_id)
+    if not offer:
+        await call.answer("Не знайдено (можливо старе повідомлення).", show_alert=True)
+        return
+
+    data = offer["data"]
+    msg_id = offer["group_msg_id"]
+
+    if action == "delete":
+        try:
+            await bot.delete_message(chat_id=GROUP_ID, message_id=msg_id)
+        except Exception:
+            pass
+        OFFERS.pop(offer_id, None)
+        await call.answer("Видалено.")
+        return
+
+    status_map = {
+        "active": "АКТИВНА",
+        "reserve": "РЕЗЕРВОВАНА",
+        "rented": "ОРЕНДОВАНА",
+    }
+    status = status_map.get(action, "АКТИВНА")
+    new_text = compact_offer_text(data, status=status)
+
+    # Edit caption if it's photo message, else edit text
+    try:
+        if call.message.photo:
+            await bot.edit_message_caption(
+                chat_id=GROUP_ID,
+                message_id=msg_id,
+                caption=new_text,
+                reply_markup=kb_offer_admin(offer_id),
+            )
+        else:
+            await bot.edit_message_text(
+                chat_id=GROUP_ID,
+                message_id=msg_id,
+                text=new_text,
+                reply_markup=kb_offer_admin(offer_id),
+            )
+        await call.answer(f"Статус: {status}")
+    except Exception as e:
+        await call.answer("Не вдалося оновити повідомлення.", show_alert=True)
 
 
-@dp.callback_query(F.data == "i_want")
-async def i_want(call: CallbackQuery):
-    await call.answer("✅ Дякую! Напиши маклеру через кнопки SMS/Дзвінок.", show_alert=True)
-
-
-# ---------------- Run ----------------
 async def main():
     await dp.start_polling(bot)
 
-
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
