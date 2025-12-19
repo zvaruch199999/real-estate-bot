@@ -36,6 +36,10 @@ def init_db():
     db.close()
 
 
+def norm(value):
+    return value if value else ""
+
+
 def create_offer(data: dict):
     db = get_db()
     cur = db.cursor()
@@ -48,19 +52,19 @@ def create_offer(data: dict):
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         datetime.now(UTC).isoformat(),
-        data["category"],
-        data["street"],
-        data["district"],
-        data["advantages"],
-        data["rent"],
-        data["deposit"],
-        data["commission"],
-        data["parking"],
-        data["settlement"],
-        data["viewing"],
-        data["broker"],
-        ",".join(data["photos"]),
-        data["status"],
+        norm(data.get("category")),
+        norm(data.get("street")),
+        norm(data.get("district")),
+        norm(data.get("advantages")),
+        norm(data.get("rent")),
+        norm(data.get("deposit")),
+        norm(data.get("commission")),
+        norm(data.get("parking")),
+        norm(data.get("settlement")),
+        norm(data.get("viewing")),
+        norm(data.get("broker")),
+        ",".join(data.get("photos", [])),
+        norm(data.get("status")),
     ))
 
     db.commit()
