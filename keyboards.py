@@ -23,3 +23,9 @@ def status_kb():
         [InlineKeyboardButton(text="🟡 РЕЗЕРВОВАНА", callback_data="status:reserved")],
         [InlineKeyboardButton(text="🔴 НЕАКТУАЛЬНА", callback_data="status:inactive")]
     ])
+
+def confirm_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Опублікувати", callback_data="confirm:yes")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="confirm:no")]
+    ])
