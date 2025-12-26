@@ -28,7 +28,7 @@ HEADERS = [
     "ID","Дата","Категорія","Тип житла","Вулиця","Місто","Район","Переваги",
     "Ціна","Депозит","Комісія","Паркінг",
     "Заселення","Огляди","Маклер",
-    "Фото","Фото_IDs","Статус",
+    "К-сть фото","Фото_IDs","Статус",
     "Хто знайшов нерухомість","Хто знайшов клієнта","Дата контракту",
     "Сума провізії","К-сть оплат","Графік оплат",
     "Клієнт","ПМЖ","Контакт"
@@ -65,14 +65,12 @@ def get_offer(row):
     wb = load_workbook(EXCEL_FILE)
     ws = wb.active
     return {
-        "category": ws.cell(row,3).value,
         "property_type": ws.cell(row,4).value,
         "street": ws.cell(row,5).value,
         "city": ws.cell(row,6).value,
-        "district": ws.cell(row,7).value,
         "rent": ws.cell(row,9).value,
         "broker": ws.cell(row,15).value,
-        "photos": ws.cell(row,16).value,
+        "photos": ws.cell(row,17).value.split(",")
     }
 
 def update_status(row, status):
@@ -88,25 +86,20 @@ def write_deal(row, values):
         ws.cell(row=row, column=i).value = v
     wb.save(EXCEL_FILE)
 
-def get_active():
+def get_active_rows():
     wb = load_workbook(EXCEL_FILE)
     ws = wb.active
-    return [
-        r for r in range(2, ws.max_row + 1)
-        if ws.cell(r,18).value == "Активна"
-    ]
+    return [r for r in range(2, ws.max_row + 1) if ws.cell(r,18).value == "Активна"]
 
 # ================= TEXT =================
 def offer_text(o, status=None):
-    text = (
+    base = (
         f"🏠 {o['property_type']}\n"
         f"📍 {o['city']}, {o['street']}\n"
         f"💰 Ціна: {o['rent']}\n"
         f"🧑‍💼 Маклер: {o['broker']}"
     )
-    if status:
-        text = f"{status}\n\n" + text
-    return text
+    return f"{status}\n\n{base}" if status else base
 
 # ================= FSM =================
 class OfferFSM(StatesGroup):
@@ -146,12 +139,6 @@ def start_kb():
         [InlineKeyboardButton(text="📕 Закрити пропозицію / угоду", callback_data="close")]
     ])
 
-def finish_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Опублікувати", callback_data="publish")],
-        [InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel")]
-    ])
-
 def status_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🟡 Резерв", callback_data="reserve")],
@@ -159,7 +146,7 @@ def status_kb():
         [InlineKeyboardButton(text="🟢 Закрита угода", callback_data="deal")]
     ])
 
-def confirm_deal_kb():
+def confirm_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Чудово, зберегти", callback_data="deal_ok")],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="deal_cancel")]
@@ -169,162 +156,119 @@ def confirm_deal_kb():
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
+# ===== START WITH PROTECTION =====
 @dp.message(Command("start"))
-async def start(m: Message):
-    await m.answer("Вітаю 👋\nОберіть дію:", reply_markup=start_kb())
+async def start(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Вітаю 👋\n⚠️ Поточну дію скасовано.\n\nОберіть дію:",
+        reply_markup=start_kb()
+    )
 
 # ================= CREATE OFFER =================
 @dp.callback_query(F.data == "new")
-async def new(cb, state: FSMContext):
-    await state.clear()
-    await cb.message.answer("Категорія:")
-    await state.set_state(OfferFSM.category)
-
+async def new_offer(cb, s): await s.clear(); await cb.message.answer("Категорія:"); await s.set_state(OfferFSM.category)
 @dp.message(OfferFSM.category)
-async def step_category(m, s): await s.update_data(category=m.text); await m.answer("Тип житла:"); await s.set_state(OfferFSM.property_type)
+async def st1(m,s): await s.update_data(category=m.text); await m.answer("Тип житла:"); await s.set_state(OfferFSM.property_type)
 @dp.message(OfferFSM.property_type)
-async def step_pt(m, s): await s.update_data(property_type=m.text); await m.answer("Вулиця:"); await s.set_state(OfferFSM.street)
+async def st2(m,s): await s.update_data(property_type=m.text); await m.answer("Вулиця:"); await s.set_state(OfferFSM.street)
 @dp.message(OfferFSM.street)
-async def step_st(m, s): await s.update_data(street=m.text); await m.answer("Місто:"); await s.set_state(OfferFSM.city)
+async def st3(m,s): await s.update_data(street=m.text); await m.answer("Місто:"); await s.set_state(OfferFSM.city)
 @dp.message(OfferFSM.city)
-async def step_city(m, s): await s.update_data(city=m.text); await m.answer("Район:"); await s.set_state(OfferFSM.district)
+async def st4(m,s): await s.update_data(city=m.text); await m.answer("Район:"); await s.set_state(OfferFSM.district)
 @dp.message(OfferFSM.district)
-async def step_dist(m, s): await s.update_data(district=m.text); await m.answer("Переваги:"); await s.set_state(OfferFSM.advantages)
+async def st5(m,s): await s.update_data(district=m.text); await m.answer("Переваги:"); await s.set_state(OfferFSM.advantages)
 @dp.message(OfferFSM.advantages)
-async def step_adv(m, s): await s.update_data(advantages=m.text); await m.answer("Ціна:"); await s.set_state(OfferFSM.rent)
+async def st6(m,s): await s.update_data(advantages=m.text); await m.answer("Ціна:"); await s.set_state(OfferFSM.rent)
 @dp.message(OfferFSM.rent)
-async def step_rent(m, s): await s.update_data(rent=m.text); await m.answer("Депозит:"); await s.set_state(OfferFSM.deposit)
+async def st7(m,s): await s.update_data(rent=m.text); await m.answer("Депозит:"); await s.set_state(OfferFSM.deposit)
 @dp.message(OfferFSM.deposit)
-async def step_dep(m, s): await s.update_data(deposit=m.text); await m.answer("Комісія:"); await s.set_state(OfferFSM.commission)
+async def st8(m,s): await s.update_data(deposit=m.text); await m.answer("Комісія:"); await s.set_state(OfferFSM.commission)
 @dp.message(OfferFSM.commission)
-async def step_com(m, s): await s.update_data(commission=m.text); await m.answer("Паркінг:"); await s.set_state(OfferFSM.parking)
+async def st9(m,s): await s.update_data(commission=m.text); await m.answer("Паркінг:"); await s.set_state(OfferFSM.parking)
 @dp.message(OfferFSM.parking)
-async def step_par(m, s): await s.update_data(parking=m.text); await m.answer("Заселення від:"); await s.set_state(OfferFSM.move_in)
+async def st10(m,s): await s.update_data(parking=m.text); await m.answer("Заселення від:"); await s.set_state(OfferFSM.move_in)
 @dp.message(OfferFSM.move_in)
-async def step_mi(m, s): await s.update_data(move_in=m.text); await m.answer("Огляди від:"); await s.set_state(OfferFSM.viewing)
+async def st11(m,s): await s.update_data(move_in=m.text); await m.answer("Огляди від:"); await s.set_state(OfferFSM.viewing)
 @dp.message(OfferFSM.viewing)
-async def step_view(m, s): await s.update_data(viewing=m.text); await m.answer("Маклер:"); await s.set_state(OfferFSM.broker)
-
+async def st12(m,s): await s.update_data(viewing=m.text); await m.answer("Маклер:"); await s.set_state(OfferFSM.broker)
 @dp.message(OfferFSM.broker)
-async def broker(m, s):
-    await s.update_data(broker=m.text, photos=[])
-    await m.answer("Надішліть фото (можна кілька)")
-
+async def st13(m,s): await s.update_data(broker=m.text, photos=[]); await m.answer("Надішліть фото:"); await s.set_state(OfferFSM.photos)
 @dp.message(OfferFSM.photos, F.photo)
-async def photos(m, s):
-    data = await s.get_data()
-    data["photos"].append(m.photo[-1].file_id)
-    await s.update_data(photos=data["photos"])
-    await m.answer("Фото додано. Напишіть будь-що, коли готово")
-
+async def st14(m,s): d=await s.get_data(); d["photos"].append(m.photo[-1].file_id); await s.update_data(photos=d["photos"]); await m.answer("Фото додано. Напишіть будь-що для завершення.")
 @dp.message(OfferFSM.photos)
-async def summary(m, s):
-    data = await s.get_data()
-    await m.answer("Опублікувати пропозицію?", reply_markup=finish_kb())
-    await s.set_state(OfferFSM.summary)
-
-@dp.callback_query(F.data == "publish")
-async def publish(cb, s):
+async def publish_offer(m,s):
     data = await s.get_data()
     row = save_offer(data)
-    text = offer_text(data)
-    media = [InputMediaPhoto(p, caption=text if i == 0 else None) for i, p in enumerate(data["photos"])]
+    media = [InputMediaPhoto(p, caption=offer_text(data) if i==0 else None) for i,p in enumerate(data["photos"])]
     await bot.send_media_group(GROUP_CHAT_ID, media)
-    await cb.message.answer("✅ Пропозицію опубліковано")
+    await m.answer("✅ Пропозицію опубліковано")
     await s.clear()
 
-# ================= CLOSE =================
+# ================= CLOSE OFFER =================
 @dp.callback_query(F.data == "close")
-async def close(cb, s):
-    active = get_active()
-    if not active:
+async def close(cb,s):
+    rows = get_active_rows()
+    if not rows:
         await cb.message.answer("Немає активних пропозицій")
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Пропозиція {r}", callback_data=f"row_{r}")]
-        for r in active
+        for r in rows
     ])
     await cb.message.answer("Оберіть пропозицію:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("row_"))
-async def choose(cb, s):
-    row = int(cb.data.split("_")[1])
+async def choose(cb,s):
+    row=int(cb.data.split("_")[1])
     await s.update_data(row=row)
     await cb.message.answer("Оберіть статус:", reply_markup=status_kb())
 
-async def send_status(row, status_text):
-    o = get_offer(row)
-    photos = o["photos"].split(",")
-    text = offer_text(o, status_text)
-    media = [InputMediaPhoto(p, caption=text if i == 0 else None) for i, p in enumerate(photos)]
+async def send_status(row, status):
+    o=get_offer(row)
+    media=[InputMediaPhoto(p, caption=offer_text(o,status) if i==0 else None) for i,p in enumerate(o["photos"])]
     await bot.send_media_group(GROUP_CHAT_ID, media)
 
-@dp.callback_query(F.data == "reserve")
-async def reserve(cb, s):
-    row = (await s.get_data())["row"]
-    update_status(row, "Резерв")
-    await send_status(row, "🟡 СТАТУС: РЕЗЕРВ")
-    await s.clear()
+@dp.callback_query(F.data=="reserve")
+async def reserve(cb,s): row=(await s.get_data())["row"]; update_status(row,"Резерв"); await send_status(row,"🟡 СТАТУС: РЕЗЕРВ"); await s.clear()
+@dp.callback_query(F.data=="inactive")
+async def inactive(cb,s): row=(await s.get_data())["row"]; update_status(row,"Неактуальна"); await send_status(row,"🔴 СТАТУС: НЕАКТУАЛЬНА"); await s.clear()
 
-@dp.callback_query(F.data == "inactive")
-async def inactive(cb, s):
-    row = (await s.get_data())["row"]
-    update_status(row, "Неактуальна")
-    await send_status(row, "🔴 СТАТУС: НЕАКТУАЛЬНА")
-    await s.clear()
-
-@dp.callback_query(F.data == "deal")
-async def deal(cb, s):
-    await cb.message.answer("Хто знайшов нерухомість?")
-    await s.set_state(CloseFSM.found_property)
-
+@dp.callback_query(F.data=="deal")
+async def deal(cb,s): await cb.message.answer("Хто знайшов нерухомість?"); await s.set_state(CloseFSM.found_property)
 @dp.message(CloseFSM.found_property)
-async def fp(m,s): await s.update_data(found_property=m.text); await m.answer("Хто знайшов клієнта?"); await s.set_state(CloseFSM.found_client)
+async def d1(m,s): await s.update_data(found_property=m.text); await m.answer("Хто знайшов клієнта?"); await s.set_state(CloseFSM.found_client)
 @dp.message(CloseFSM.found_client)
-async def fc(m,s): await s.update_data(found_client=m.text); await m.answer("Дата контракту:"); await s.set_state(CloseFSM.contract_date)
+async def d2(m,s): await s.update_data(found_client=m.text); await m.answer("Дата контракту:"); await s.set_state(CloseFSM.contract_date)
 @dp.message(CloseFSM.contract_date)
-async def cd(m,s): await s.update_data(contract_date=m.text); await m.answer("Сума провізії:"); await s.set_state(CloseFSM.commission_sum)
+async def d3(m,s): await s.update_data(contract_date=m.text); await m.answer("Сума провізії:"); await s.set_state(CloseFSM.commission_sum)
 @dp.message(CloseFSM.commission_sum)
-async def cs(m,s): await s.update_data(commission_sum=m.text); await m.answer("К-сть оплат:"); await s.set_state(CloseFSM.payments_count)
+async def d4(m,s): await s.update_data(commission_sum=m.text); await m.answer("К-сть оплат:"); await s.set_state(CloseFSM.payments_count)
 @dp.message(CloseFSM.payments_count)
-async def pc(m,s): await s.update_data(payments_count=m.text); await m.answer("Графік оплат:"); await s.set_state(CloseFSM.payments_details)
+async def d5(m,s): await s.update_data(payments_count=m.text); await m.answer("Графік оплат:"); await s.set_state(CloseFSM.payments_details)
 @dp.message(CloseFSM.payments_details)
-async def pd(m,s): await s.update_data(payments_details=m.text); await m.answer("ПІБ клієнта:"); await s.set_state(CloseFSM.client_name)
+async def d6(m,s): await s.update_data(payments_details=m.text); await m.answer("ПІБ клієнта:"); await s.set_state(CloseFSM.client_name)
 @dp.message(CloseFSM.client_name)
-async def cn(m,s): await s.update_data(client_name=m.text); await m.answer("ПМЖ клієнта:"); await s.set_state(CloseFSM.residence)
+async def d7(m,s): await s.update_data(client_name=m.text); await m.answer("ПМЖ клієнта:"); await s.set_state(CloseFSM.residence)
 @dp.message(CloseFSM.residence)
-async def rs(m,s): await s.update_data(residence=m.text); await m.answer("Контакт:"); await s.set_state(CloseFSM.contact)
-
+async def d8(m,s): await s.update_data(residence=m.text); await m.answer("Контакт:"); await s.set_state(CloseFSM.contact)
 @dp.message(CloseFSM.contact)
-async def confirm(m,s):
+async def d9(m,s):
     await s.update_data(contact=m.text)
-    d = await s.get_data()
-    text = (
-        "📋 УЗАГАЛЬНЕННЯ УГОДИ\n\n"
-        f"Клієнт: {d['client_name']}\n"
-        f"Провізія: {d['commission_sum']}"
-    )
-    await m.answer(text, reply_markup=confirm_deal_kb())
+    await m.answer("Зберегти угоду?", reply_markup=confirm_kb())
     await s.set_state(CloseFSM.summary)
 
-@dp.callback_query(F.data == "deal_ok")
-async def deal_ok(cb,s):
-    d = await s.get_data()
-    row = d["row"]
-    write_deal(row, [
-        d["found_property"], d["found_client"], d["contract_date"],
-        d["commission_sum"], d["payments_count"], d["payments_details"],
-        d["client_name"], d["residence"], d["contact"]
-    ])
-    update_status(row, "Закрита угода")
-    await send_status(row, "🟢 УГОДУ ЗАКРИТО")
+@dp.callback_query(F.data=="deal_ok")
+async def d10(cb,s):
+    d=await s.get_data(); row=d["row"]
+    write_deal(row,[d["found_property"],d["found_client"],d["contract_date"],d["commission_sum"],d["payments_count"],d["payments_details"],d["client_name"],d["residence"],d["contact"]])
+    update_status(row,"Закрита угода")
+    await send_status(row,"🟢 УГОДУ ЗАКРИТО")
     await cb.message.answer("✅ Угоду збережено")
     await s.clear()
 
-@dp.callback_query(F.data == "deal_cancel")
-async def deal_cancel(cb,s):
-    await s.clear()
-    await cb.message.answer("❌ Скасовано")
+@dp.callback_query(F.data=="deal_cancel")
+async def d11(cb,s): await s.clear(); await cb.message.answer("❌ Скасовано")
 
 # ================= MAIN =================
 async def main():
