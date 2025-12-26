@@ -4,35 +4,31 @@ from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
-    Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    InputMediaPhoto
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputMediaPhoto,
 )
-from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 from aiogram.filters import Command
 
 from openpyxl import Workbook, load_workbook
 
-# =====================================================
-# ENV
-# =====================================================
+# ===================== ENV =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не задано")
 
-# =====================================================
-# FILES
-# =====================================================
+# ===================== FILES =====================
 DATA_DIR = "data"
 EXCEL_FILE = f"{DATA_DIR}/offers.xlsx"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# =====================================================
-# LABELS (UA)
-# =====================================================
+# ===================== LABELS =====================
 FIELD_LABELS = {
     "category": "Категорія",
     "property_type": "Тип житла",
@@ -49,23 +45,20 @@ FIELD_LABELS = {
     "broker": "Маклер",
 }
 
-def format_offer_text(data: dict) -> str:
+def format_offer(data: dict) -> str:
     text = ""
-    for key, label in FIELD_LABELS.items():
-        if key in data:
-            text += f"{label}: {data[key]}\n"
+    for k, label in FIELD_LABELS.items():
+        text += f"{label}: {data.get(k, '')}\n"
     text += f"\n📸 Фото: {len(data.get('photos', []))}"
     return text
 
-# =====================================================
-# EXCEL
-# =====================================================
+# ===================== EXCEL =====================
 HEADERS = [
-    "ID","Дата створення","Категорія","Тип житла","Вулиця","Місто","Район",
-    "Переваги","Орендна плата","Депозит","Комісія","Паркінг",
-    "Заселення від","Огляди від","Маклер","Кількість фото","Статус",
+    "ID","Дата","Категорія","Тип","Вулиця","Місто","Район","Переваги",
+    "Оренда","Депозит","Комісія","Паркінг",
+    "Заселення","Огляди","Маклер","Фото","Статус",
     "Хто знайшов нерухомість","Хто знайшов клієнта","Дата контракту",
-    "Сума провізії","Кількість оплат","Графік оплат",
+    "Сума провізії","К-сть оплат","Графік оплат",
     "Клієнт","ПМЖ","Контакт"
 ]
 
@@ -80,7 +73,6 @@ def save_offer(data: dict) -> int:
     wb = load_workbook(EXCEL_FILE)
     ws = wb.active
     offer_id = ws.max_row
-
     ws.append([
         offer_id,
         datetime.now().strftime("%Y-%m-%d"),
@@ -97,8 +89,8 @@ def save_offer(data: dict) -> int:
         data["move_in"],
         data["viewing"],
         data["broker"],
-        len(data.get("photos", [])),
-        "Активна",  # 🔴 КЛЮЧОВЕ
+        len(data["photos"]),
+        "Активна",
         "", "", "", "", "", "", "", "", ""
     ])
     wb.save(EXCEL_FILE)
@@ -107,13 +99,11 @@ def save_offer(data: dict) -> int:
 def get_active_offers():
     wb = load_workbook(EXCEL_FILE)
     ws = wb.active
-    offers = []
+    result = []
     for r in range(2, ws.max_row + 1):
         if ws.cell(r, 17).value == "Активна":
-            street = ws.cell(r, 5).value
-            city = ws.cell(r, 6).value
-            offers.append((r, street, city))
-    return offers
+            result.append((r, ws.cell(r, 6).value, ws.cell(r, 5).value))
+    return result
 
 def set_status(row: int, status: str):
     wb = load_workbook(EXCEL_FILE)
@@ -124,13 +114,11 @@ def set_status(row: int, status: str):
 def write_deal(row: int, values: list):
     wb = load_workbook(EXCEL_FILE)
     ws = wb.active
-    for i, val in enumerate(values, start=18):
-        ws.cell(row=row, column=i).value = val
+    for i, v in enumerate(values, start=18):
+        ws.cell(row=row, column=i).value = v
     wb.save(EXCEL_FILE)
 
-# =====================================================
-# FSM
-# =====================================================
+# ===================== FSM =====================
 class OfferFSM(StatesGroup):
     category = State()
     property_type = State()
@@ -160,9 +148,7 @@ class CloseFSM(StatesGroup):
     residence = State()
     contact = State()
 
-# =====================================================
-# KEYBOARDS
-# =====================================================
+# ===================== KEYBOARDS =====================
 def start_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Створити пропозицію", callback_data="new_offer")],
@@ -193,64 +179,101 @@ def status_kb():
         [InlineKeyboardButton(text="🟢 Закрита угода", callback_data="deal")]
     ])
 
-# =====================================================
-# BOT
-# =====================================================
+# ===================== BOT =====================
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message(Command("start"))
-async def start(msg: Message):
-    await msg.answer("Вітаю 👋\nОберіть дію:", reply_markup=start_kb())
+async def start(message: Message):
+    await message.answer("Вітаю 👋\nОберіть дію:", reply_markup=start_kb())
 
 # ===================== CREATE OFFER =====================
 @dp.callback_query(F.data == "new_offer")
 async def new_offer(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await cb.message.answer("Оберіть категорію:", reply_markup=category_kb())
+    await cb.message.answer("Категорія:", reply_markup=category_kb())
     await state.set_state(OfferFSM.category)
 
 @dp.callback_query(OfferFSM.category)
-async def cat(cb, state):
+async def category(cb: CallbackQuery, state: FSMContext):
     await state.update_data(category=cb.data)
     await cb.message.answer("Тип житла:")
     await state.set_state(OfferFSM.property_type)
 
 @dp.message(OfferFSM.property_type)
-async def step(msg, state, key="property_type", next_state=OfferFSM.street, q="Вулиця:"):
-    await state.update_data(**{key: msg.text})
-    await msg.answer(q)
-    await state.set_state(next_state)
+async def property_type(msg: Message, state: FSMContext):
+    await state.update_data(property_type=msg.text)
+    await msg.answer("Вулиця:")
+    await state.set_state(OfferFSM.street)
 
 @dp.message(OfferFSM.street)
-async def _(m,s): await step(m,s,"street",OfferFSM.city,"Місто:")
+async def street(msg: Message, state: FSMContext):
+    await state.update_data(street=msg.text)
+    await msg.answer("Місто:")
+    await state.set_state(OfferFSM.city)
+
 @dp.message(OfferFSM.city)
-async def _(m,s): await step(m,s,"city",OfferFSM.district,"Район:")
+async def city(msg: Message, state: FSMContext):
+    await state.update_data(city=msg.text)
+    await msg.answer("Район:")
+    await state.set_state(OfferFSM.district)
+
 @dp.message(OfferFSM.district)
-async def _(m,s): await step(m,s,"district",OfferFSM.advantages,"Переваги:")
+async def district(msg: Message, state: FSMContext):
+    await state.update_data(district=msg.text)
+    await msg.answer("Переваги:")
+    await state.set_state(OfferFSM.advantages)
+
 @dp.message(OfferFSM.advantages)
-async def _(m,s): await step(m,s,"advantages",OfferFSM.rent,"Орендна плата:")
+async def advantages(msg: Message, state: FSMContext):
+    await state.update_data(advantages=msg.text)
+    await msg.answer("Орендна плата:")
+    await state.set_state(OfferFSM.rent)
+
 @dp.message(OfferFSM.rent)
-async def _(m,s): await step(m,s,"rent",OfferFSM.deposit,"Депозит:")
+async def rent(msg: Message, state: FSMContext):
+    await state.update_data(rent=msg.text)
+    await msg.answer("Депозит:")
+    await state.set_state(OfferFSM.deposit)
+
 @dp.message(OfferFSM.deposit)
-async def _(m,s): await step(m,s,"deposit",OfferFSM.commission,"Комісія:")
+async def deposit(msg: Message, state: FSMContext):
+    await state.update_data(deposit=msg.text)
+    await msg.answer("Комісія:")
+    await state.set_state(OfferFSM.commission)
+
 @dp.message(OfferFSM.commission)
-async def _(m,s): await step(m,s,"commission",OfferFSM.parking,"Паркінг:")
+async def commission(msg: Message, state: FSMContext):
+    await state.update_data(commission=msg.text)
+    await msg.answer("Паркінг:")
+    await state.set_state(OfferFSM.parking)
+
 @dp.message(OfferFSM.parking)
-async def _(m,s): await step(m,s,"parking",OfferFSM.move_in,"Заселення від:")
+async def parking(msg: Message, state: FSMContext):
+    await state.update_data(parking=msg.text)
+    await msg.answer("Заселення від:")
+    await state.set_state(OfferFSM.move_in)
+
 @dp.message(OfferFSM.move_in)
-async def _(m,s): await step(m,s,"move_in",OfferFSM.viewing,"Огляди від:")
+async def move_in(msg: Message, state: FSMContext):
+    await state.update_data(move_in=msg.text)
+    await msg.answer("Огляди від:")
+    await state.set_state(OfferFSM.viewing)
+
 @dp.message(OfferFSM.viewing)
-async def _(m,s): await step(m,s,"viewing",OfferFSM.broker,"Маклер (@нік):")
+async def viewing(msg: Message, state: FSMContext):
+    await state.update_data(viewing=msg.text)
+    await msg.answer("Маклер (@нік):")
+    await state.set_state(OfferFSM.broker)
 
 @dp.message(OfferFSM.broker)
-async def broker(msg, state):
+async def broker(msg: Message, state: FSMContext):
     await state.update_data(broker=msg.text, photos=[])
     await msg.answer("Надішліть фото:", reply_markup=photos_kb())
     await state.set_state(OfferFSM.photos)
 
 @dp.message(OfferFSM.photos, F.photo)
-async def photo(msg, state):
+async def photos(msg: Message, state: FSMContext):
     data = await state.get_data()
     photos = data["photos"]
     photos.append(msg.photo[-1].file_id)
@@ -258,19 +281,19 @@ async def photo(msg, state):
     await msg.answer(f"📸 Фото додано ({len(photos)})")
 
 @dp.callback_query(F.data == "photos_done")
-async def summary(cb, state):
+async def summary(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    await cb.message.answer("📋 ПРОПОЗИЦІЯ:\n\n"+format_offer_text(data), reply_markup=finish_kb())
+    await cb.message.answer("📋 ПРОПОЗИЦІЯ:\n\n" + format_offer(data), reply_markup=finish_kb())
     await state.set_state(OfferFSM.summary)
 
 @dp.callback_query(F.data == "publish")
-async def publish(cb, state):
+async def publish(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     offer_id = save_offer(data)
-    caption = f"🆕 ПРОПОЗИЦІЯ №{offer_id}\n\n"+format_offer_text(data)
-    photos = data["photos"]
-    if photos:
-        media=[InputMediaPhoto(media=p,caption=caption if i==0 else None) for i,p in enumerate(photos)]
+    caption = f"🆕 ПРОПОЗИЦІЯ №{offer_id}\n\n" + format_offer(data)
+    media = [InputMediaPhoto(media=p, caption=caption if i == 0 else None)
+             for i, p in enumerate(data["photos"])]
+    if media:
         await bot.send_media_group(GROUP_CHAT_ID, media)
     else:
         await bot.send_message(GROUP_CHAT_ID, caption)
@@ -278,72 +301,125 @@ async def publish(cb, state):
     await state.clear()
 
 @dp.callback_query(F.data == "cancel")
-async def cancel(cb, state):
+async def cancel(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.message.answer("❌ Скасовано")
 
 # ===================== CLOSE OFFER =====================
 @dp.callback_query(F.data == "close_offer")
-async def close_offer(cb, state):
+async def close_offer(cb: CallbackQuery, state: FSMContext):
     offers = get_active_offers()
     if not offers:
         await cb.message.answer("Немає активних пропозицій")
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"{city}, {street}", callback_data=f"row_{row}")]
-        for row, street, city in offers
+        for row, city, street in offers
     ])
     await cb.message.answer("Оберіть пропозицію:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("row_"))
-async def choose_status(cb, state):
+async def choose_status(cb: CallbackQuery, state: FSMContext):
     row = int(cb.data.split("_")[1])
     await state.update_data(offer_row=row)
     await cb.message.answer("Оберіть статус:", reply_markup=status_kb())
 
-@dp.callback_query(F.data in ["reserve","inactive"])
-async def simple_status(cb, state):
-    row=(await state.get_data())["offer_row"]
-    status="Резерв" if cb.data=="reserve" else "Неактуальна"
-    set_status(row,status)
-    await bot.send_message(GROUP_CHAT_ID,f"{'🟡' if status=='Резерв' else '🔴'} ПРОПОЗИЦІЯ №{row-1} — {status}")
+@dp.callback_query(F.data == "reserve")
+async def reserve(cb: CallbackQuery, state: FSMContext):
+    row = (await state.get_data())["offer_row"]
+    set_status(row, "Резерв")
+    await bot.send_message(GROUP_CHAT_ID, f"🟡 ПРОПОЗИЦІЯ №{row-1} ЗАРЕЗЕРВОВАНА")
     await state.clear()
 
-@dp.callback_query(F.data=="deal")
-async def deal(cb,state):
+@dp.callback_query(F.data == "inactive")
+async def inactive(cb: CallbackQuery, state: FSMContext):
+    row = (await state.get_data())["offer_row"]
+    set_status(row, "Неактуальна")
+    await bot.send_message(GROUP_CHAT_ID, f"🔴 ПРОПОЗИЦІЯ №{row-1} НЕАКТУАЛЬНА")
+    await state.clear()
+
+@dp.callback_query(F.data == "deal")
+async def deal(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("Хто знайшов нерухомість?")
     await state.set_state(CloseFSM.found_property)
 
 @dp.message(CloseFSM.found_property)
-async def _(m,s): await s.update_data(found_property=m.text); await m.answer("Хто знайшов клієнта?"); await s.set_state(CloseFSM.found_client)
+async def found_property(msg: Message, state: FSMContext):
+    await state.update_data(found_property=msg.text)
+    await msg.answer("Хто знайшов клієнта?")
+    await state.set_state(CloseFSM.found_client)
+
 @dp.message(CloseFSM.found_client)
-async def _(m,s): await s.update_data(found_client=m.text); await m.answer("Дата контракту:"); await s.set_state(CloseFSM.contract_date)
+async def found_client(msg: Message, state: FSMContext):
+    await state.update_data(found_client=msg.text)
+    await msg.answer("Дата контракту:")
+    await state.set_state(CloseFSM.contract_date)
+
 @dp.message(CloseFSM.contract_date)
-async def _(m,s): await s.update_data(contract_date=m.text); await m.answer("Сума провізії:"); await s.set_state(CloseFSM.commission_sum)
+async def contract_date(msg: Message, state: FSMContext):
+    await state.update_data(contract_date=msg.text)
+    await msg.answer("Сума провізії:")
+    await state.set_state(CloseFSM.commission_sum)
+
 @dp.message(CloseFSM.commission_sum)
-async def _(m,s): await s.update_data(commission_sum=m.text); await m.answer("Кількість оплат:"); await s.set_state(CloseFSM.payments_count)
+async def commission_sum(msg: Message, state: FSMContext):
+    await state.update_data(commission_sum=msg.text)
+    await msg.answer("Кількість оплат:")
+    await state.set_state(CloseFSM.payments_count)
+
 @dp.message(CloseFSM.payments_count)
-async def _(m,s): await s.update_data(payments_count=m.text); await m.answer("Графік оплат:"); await s.set_state(CloseFSM.payments_details)
+async def payments_count(msg: Message, state: FSMContext):
+    await state.update_data(payments_count=msg.text)
+    await msg.answer("Графік оплат:")
+    await state.set_state(CloseFSM.payments_details)
+
 @dp.message(CloseFSM.payments_details)
-async def _(m,s): await s.update_data(payments_details=m.text); await m.answer("ПІБ клієнта:"); await s.set_state(CloseFSM.client_name)
+async def payments_details(msg: Message, state: FSMContext):
+    await state.update_data(payments_details=msg.text)
+    await msg.answer("ПІБ клієнта:")
+    await state.set_state(CloseFSM.client_name)
+
 @dp.message(CloseFSM.client_name)
-async def _(m,s): await s.update_data(client_name=m.text); await m.answer("ПМЖ клієнта:"); await s.set_state(CloseFSM.residence)
+async def client_name(msg: Message, state: FSMContext):
+    await state.update_data(client_name=msg.text)
+    await msg.answer("ПМЖ клієнта:")
+    await state.set_state(CloseFSM.residence)
+
 @dp.message(CloseFSM.residence)
-async def _(m,s): await s.update_data(residence=m.text); await m.answer("Контакт клієнта:"); await s.set_state(CloseFSM.contact)
+async def residence(msg: Message, state: FSMContext):
+    await state.update_data(residence=msg.text)
+    await msg.answer("Контакт клієнта:")
+    await state.set_state(CloseFSM.contact)
+
 @dp.message(CloseFSM.contact)
-async def finish(m,s):
-    d=await s.get_data()
-    row=d["offer_row"]
-    write_deal(row,[d[k] for k in ["found_property","found_client","contract_date","commission_sum","payments_count","payments_details","client_name","residence","contact"]])
-    set_status(row,"Закрита угода")
-    await bot.send_message(GROUP_CHAT_ID,f"🟢 ПРОПОЗИЦІЯ №{row-1} ЗАКРИТА\nКлієнт: {d['client_name']}\nПровізія: {d['commission_sum']}")
-    await m.answer("✅ Угоду закрито")
-    await s.clear()
+async def finish_deal(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    row = data["offer_row"]
+    write_deal(row, [
+        data["found_property"],
+        data["found_client"],
+        data["contract_date"],
+        data["commission_sum"],
+        data["payments_count"],
+        data["payments_details"],
+        data["client_name"],
+        data["residence"],
+        data["contact"],
+    ])
+    set_status(row, "Закрита угода")
+    await bot.send_message(
+        GROUP_CHAT_ID,
+        f"🟢 ПРОПОЗИЦІЯ №{row-1} ЗАКРИТА\n"
+        f"Клієнт: {data['client_name']}\n"
+        f"Провізія: {data['commission_sum']}"
+    )
+    await msg.answer("✅ Угоду закрито")
+    await state.clear()
 
 # ===================== MAIN =====================
 async def main():
     init_excel()
     await dp.start_polling(bot)
 
-if __name__=="__main__":
+if __name__ == "__main__":
     asyncio.run(main())
