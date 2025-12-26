@@ -120,6 +120,7 @@ class OfferFSM(StatesGroup):
     move_in = State()
     viewing = State()
     broker = State()
+    photos = State()
     summary = State()
 
 class CloseFSM(StatesGroup):
