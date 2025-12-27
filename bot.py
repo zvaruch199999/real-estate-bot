@@ -1,235 +1,176 @@
-import os
-import asyncio
-from datetime import datetime
+import asyncio, os
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import (
-    Message, CallbackQuery,
-    InputMediaPhoto,
-    InlineKeyboardMarkup, InlineKeyboardButton
-)
-from aiogram.filters import Command
+from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
 from openpyxl import Workbook, load_workbook
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
+TOKEN = os.getenv("BOT_TOKEN")
+GROUP_ID = int(os.getenv("GROUP_CHAT_ID"))
 
-bot = Bot(BOT_TOKEN)
-dp = Dispatcher()
+bot = Bot(TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 
-# =========================
-# ПРОСТА ПАМʼЯТЬ
-# =========================
-user_data = {}
-user_photos = {}
+# ===================== EXCEL =====================
+FILE = "deals.xlsx"
 
-FIELDS = [
-    ("category", "Категорія"),
-    ("type", "Тип житла"),
-    ("street", "Вулиця"),
-    ("city", "Місто"),
-    ("district", "Район"),
-    ("price", "Ціна"),
-    ("deposit", "Депозит"),
-    ("commission", "Комісія"),
-    ("parking", "Паркінг (Є / Нема)"),
-    ("move_in", "Заселення (Вже / Пізніше)"),
-    ("views", "Огляди (Вже / Пізніше)"),
-    ("broker", "Маклер (нік)")
-]
-
-# =========================
-# ЛІЧИЛЬНИК ПРОПОЗИЦІЙ
-# =========================
-COUNTER_FILE = "counter.txt"
-
-def get_next_offer_id() -> int:
-    if not os.path.exists(COUNTER_FILE):
-        with open(COUNTER_FILE, "w") as f:
-            f.write("1")
-        return 1
-
-    with open(COUNTER_FILE, "r+") as f:
-        num = int(f.read())
-        f.seek(0)
-        f.write(str(num + 1))
-        f.truncate()
-        return num
-
-# =========================
-# КНОПКИ СТАТУСУ
-# =========================
-def status_kb(offer_id: int):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🟢 Актуально", callback_data=f"status:{offer_id}:active"),
-            InlineKeyboardButton(text="🟡 Резерв", callback_data=f"status:{offer_id}:reserved"),
-            InlineKeyboardButton(text="🔴 Неактуально", callback_data=f"status:{offer_id}:inactive")
-        ],
-        [
-            InlineKeyboardButton(text="✅ Закрити угоду", callback_data=f"deal:{offer_id}")
-        ]
-    ])
-
-# =========================
-# /start
-# =========================
-@dp.message(Command("start"))
-async def start(msg: Message):
-    user_data[msg.from_user.id] = {}
-    user_photos[msg.from_user.id] = []
-
-    await msg.answer(
-        "🏠 **Створення нової пропозиції**\n\n"
-        "Відповідайте на питання по черзі.",
-        parse_mode="Markdown"
-    )
-
-    key, label = FIELDS[0]
-    await msg.answer(f"🏷 {label}:")
-
-# =========================
-# ЗБІР ТЕКСТУ
-# =========================
-@dp.message(F.text)
-async def collect_fields(msg: Message):
-    uid = msg.from_user.id
-
-    if uid not in user_data:
-        return
-
-    if msg.text.lower() == "/done":
-        if not user_photos[uid]:
-            await msg.answer("❗ Додайте хоча б одне фото")
-            return
-        await publish_offer(uid, msg)
-        return
-
-    data = user_data[uid]
-
-    if len(data) < len(FIELDS):
-        key, _ = FIELDS[len(data)]
-        data[key] = msg.text
-
-        if len(data) < len(FIELDS):
-            next_label = FIELDS[len(data)][1]
-            await msg.answer(f"➡️ {next_label}:")
-        else:
-            await msg.answer(
-                "📸 Надішліть фото.\n"
-                "Коли завершите — напишіть команду:\n"
-                "`/done`",
-                parse_mode="Markdown"
-            )
-
-# =========================
-# ЗБІР ФОТО
-# =========================
-@dp.message(F.photo)
-async def collect_photos(msg: Message):
-    uid = msg.from_user.id
-    if uid not in user_photos:
-        return
-
-    user_photos[uid].append(msg.photo[-1].file_id)
-    await msg.answer(f"📷 Фото додано ({len(user_photos[uid])})")
-
-# =========================
-# ПУБЛІКАЦІЯ
-# =========================
-async def publish_offer(uid: int, msg: Message):
-    data = user_data[uid]
-    photos = user_photos[uid]
-    offer_id = get_next_offer_id()
-
-    text = (
-        f"🏠 **НОВА ПРОПОЗИЦІЯ #{offer_id:04d}**\n"
-        f"📊 Статус: 🟢 Актуально\n\n"
-        f"🏷 Категорія: {data['category']}\n"
-        f"🏠 Тип: {data['type']}\n"
-        f"📍 Адреса: {data['street']}, {data['city']}\n"
-        f"🗺 Район: {data['district']}\n"
-        f"💰 Ціна: {data['price']}\n"
-        f"🔐 Депозит: {data['deposit']}\n"
-        f"🤝 Комісія: {data['commission']}\n"
-        f"🚗 Паркінг: {data['parking']}\n"
-        f"🚪 Заселення: {data['move_in']}\n"
-        f"👀 Огляди: {data['views']}\n"
-        f"👤 Маклер: {data['broker']}"
-    )
-
-    media = [InputMediaPhoto(media=photos[0])]
-    for p in photos[1:]:
-        media.append(InputMediaPhoto(media=p))
-
-    album = await bot.send_media_group(GROUP_CHAT_ID, media)
-
-    await bot.send_message(
-        GROUP_CHAT_ID,
-        text,
-        parse_mode="Markdown",
-        reply_markup=status_kb(offer_id),
-        reply_to_message_id=album[0].message_id
-    )
-
-    await msg.answer(f"✅ Пропозицію #{offer_id:04d} опубліковано")
-
-    user_data.pop(uid, None)
-    user_photos.pop(uid, None)
-
-# =========================
-# СТАТУСИ
-# =========================
-@dp.callback_query(F.data.startswith("status:"))
-async def change_status(cb: CallbackQuery):
-    _, offer_id, status = cb.data.split(":")
-
-    map_status = {
-        "active": "🟢 Актуально",
-        "reserved": "🟡 Резерв",
-        "inactive": "🔴 Неактуально"
-    }
-
-    lines = cb.message.text.splitlines()
-    lines[1] = f"📊 Статус: {map_status[status]}"
-
-    await cb.message.edit_text(
-        "\n".join(lines),
-        parse_mode="Markdown",
-        reply_markup=status_kb(int(offer_id))
-    )
-    await cb.answer("Статус оновлено")
-
-# =========================
-# ЗАКРИТТЯ + EXCEL
-# =========================
-@dp.callback_query(F.data.startswith("deal:"))
-async def close_deal(cb: CallbackQuery):
-    offer_id = cb.data.split(":")[1]
-    save_to_excel(offer_id, cb.message.text)
-
-    await cb.message.edit_text(
-        cb.message.text.replace("📊 Статус:", "📊 Статус: ✅ Закрито"),
-        parse_mode="Markdown"
-    )
-    await cb.answer("Угоду закрито")
-
-def save_to_excel(offer_id: str, text: str):
-    file = "deals.xlsx"
-
-    if not os.path.exists(file):
+def save_deal(row):
+    if not os.path.exists(FILE):
         wb = Workbook()
         ws = wb.active
-        ws.append(["Дата", "ID", "Дані"])
-        wb.save(file)
+        ws.append([
+            "ID","Категорія","Тип","Адреса","Ціна","Маклер",
+            "Хто знайшов житло","Хто клієнта","Дата",
+            "Комісія","Оплати","Графік","ПІБ","Контакт"
+        ])
+        wb.save(FILE)
 
-    wb = load_workbook(file)
+    wb = load_workbook(FILE)
     ws = wb.active
-    ws.append([datetime.now().strftime("%Y-%m-%d %H:%M"), offer_id, text])
-    wb.save(file)
+    ws.append(row)
+    wb.save(FILE)
 
-# =========================
-# START
-# =========================
+# ===================== STATES =====================
+class Offer(StatesGroup):
+    category = State()
+    type = State()
+    address = State()
+    price = State()
+    broker = State()
+    photos = State()
+    confirm = State()
+
+class CloseDeal(StatesGroup):
+    step = State()
+
+# ===================== CREATE =====================
+@dp.message(F.text == "/start")
+async def start(m: Message, s: FSMContext):
+    await s.clear()
+    await m.answer("Напишіть `create` щоб створити пропозицію")
+
+@dp.message(F.text.lower() == "create")
+async def create(m: Message, s: FSMContext):
+    await s.set_state(Offer.category)
+    await m.answer("Категорія:")
+
+@dp.message(Offer.category)
+async def cat(m: Message, s: FSMContext):
+    await s.update_data(category=m.text)
+    await s.set_state(Offer.type)
+    await m.answer("Тип:")
+
+@dp.message(Offer.type)
+async def typ(m: Message, s: FSMContext):
+    await s.update_data(type=m.text)
+    await s.set_state(Offer.address)
+    await m.answer("Адреса:")
+
+@dp.message(Offer.address)
+async def addr(m: Message, s: FSMContext):
+    await s.update_data(address=m.text)
+    await s.set_state(Offer.price)
+    await m.answer("Ціна:")
+
+@dp.message(Offer.price)
+async def price(m: Message, s: FSMContext):
+    await s.update_data(price=m.text)
+    await s.set_state(Offer.broker)
+    await m.answer("Маклер (@username):")
+
+@dp.message(Offer.broker)
+async def broker(m: Message, s: FSMContext):
+    await s.update_data(broker=m.text, photos=[])
+    await s.set_state(Offer.photos)
+    await m.answer("Надішліть фото. Коли завершите — `/done`")
+
+@dp.message(F.photo, Offer.photos)
+async def photos(m: Message, s: FSMContext):
+    data = await s.get_data()
+    data["photos"].append(m.photo[-1].file_id)
+    await s.update_data(photos=data["photos"])
+    await m.answer(f"Фото додано ({len(data['photos'])})")
+
+@dp.message(F.text == "/done", Offer.photos)
+async def done(m: Message, s: FSMContext):
+    d = await s.get_data()
+    text = (
+        f"🏠 НОВА ПРОПОЗИЦІЯ\n\n"
+        f"📦 Категорія: {d['category']}\n"
+        f"🏡 Тип: {d['type']}\n"
+        f"📍 Адреса: {d['address']}\n"
+        f"💰 Ціна: {d['price']}\n"
+        f"👤 Маклер: {d['broker']}\n\n"
+        "Напишіть:\n"
+        "✅ publish — опублікувати\n"
+        "✏️ edit — змінити\n"
+        "❌ cancel — скасувати"
+    )
+    await s.set_state(Offer.confirm)
+    await m.answer(text)
+
+# ===================== PUBLISH =====================
+@dp.message(F.text == "publish", Offer.confirm)
+async def publish(m: Message, s: FSMContext):
+    d = await s.get_data()
+
+    media = [InputMediaPhoto(media=p) for p in d["photos"]]
+    media[0].caption = (
+        f"🏠 НОВА ПРОПОЗИЦІЯ\n"
+        f"🟢 Статус: Актуально\n\n"
+        f"📦 {d['category']}\n"
+        f"🏡 {d['type']}\n"
+        f"📍 {d['address']}\n"
+        f"💰 {d['price']}\n"
+        f"👤 {d['broker']}"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🟢 Актуально", callback_data="status_active"),
+        InlineKeyboardButton(text="🟡 Резерв", callback_data="status_reserved"),
+        InlineKeyboardButton(text="🔴 Неактуально", callback_data="status_closed"),
+        InlineKeyboardButton(text="🔒 Закрити угоду", callback_data="close")
+    ]])
+
+    msgs = await bot.send_media_group(GROUP_ID, media)
+    await bot.send_message(GROUP_ID, "⬆️ Керування статусом", reply_markup=kb)
+
+    await m.answer("✅ Пропозицію опубліковано")
+    await s.clear()
+
+# ===================== CLOSE DEAL =====================
+@dp.callback_query(F.data == "close")
+async def close(cb, s: FSMContext):
+    await s.set_state(CloseDeal.step)
+    await s.update_data(step=0, answers=[])
+    await cb.message.answer("Хто знайшов нерухомість?")
+
+@dp.message(CloseDeal.step)
+async def close_steps(m: Message, s: FSMContext):
+    data = await s.get_data()
+    answers = data["answers"]
+    answers.append(m.text)
+
+    questions = [
+        "Хто знайшов клієнта?",
+        "Дата контракту:",
+        "Сума комісії:",
+        "Кількість оплат:",
+        "Графік оплат:",
+        "ПІБ клієнта:",
+        "Контакт клієнта:"
+    ]
+
+    if len(answers) < len(questions):
+        await s.update_data(answers=answers)
+        await m.answer(questions[len(answers)-1])
+    else:
+        save_deal(["#", "", "", "", "", "", *answers])
+        await m.answer("✅ Угоду закрито та збережено в Excel")
+        await s.clear()
+
+# ===================== RUN =====================
 async def main():
     await dp.start_polling(bot)
 
