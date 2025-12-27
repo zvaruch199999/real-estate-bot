@@ -1,7 +1,13 @@
 import asyncio
 import os
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, InputMediaPhoto
+from aiogram.types import (
+    Message,
+    InputMediaPhoto,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -9,9 +15,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ================= ENV =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
-
-if not BOT_TOKEN or not GROUP_CHAT_ID:
-    raise RuntimeError("BOT_TOKEN або GROUP_CHAT_ID не задані")
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -33,6 +36,12 @@ class OfferFSM(StatesGroup):
     broker = State()
     photos = State()
 
+# ================= KEYBOARDS =================
+DONE_KB = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="✅ Готово")]],
+    resize_keyboard=True,
+)
+
 # ================= START =================
 @dp.message(F.text == "/start")
 async def start(message: Message, state: FSMContext):
@@ -41,13 +50,17 @@ async def start(message: Message, state: FSMContext):
         "Вітаю 👋\n\n"
         "Напишіть:\n"
         "👉 створити — створити пропозицію\n"
-        "👉 скасувати — скасувати дію"
+        "👉 скасувати — скасувати дію",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 @dp.message(F.text.lower() == "скасувати")
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("❌ Дію скасовано.\n\n/start — почати знову")
+    await message.answer(
+        "❌ Дію скасовано.\n\n/start — почати знову",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
 # ================= CREATE =================
 @dp.message(F.text.lower() == "створити")
@@ -133,7 +146,8 @@ async def step13(message: Message, state: FSMContext):
     await state.set_state(OfferFSM.photos)
     await message.answer(
         "📸 Надішліть фото.\n"
-        "Коли завершите — напишіть Готово"
+        "Коли завершите — натисніть кнопку «✅ Готово»",
+        reply_markup=DONE_KB,
     )
 
 # ================= PHOTOS =================
@@ -143,16 +157,10 @@ async def add_photo(message: Message, state: FSMContext):
     photos = data.get("photos", [])
     photos.append(message.photo[-1].file_id)
     await state.update_data(photos=photos)
-    await message.answer("📸 Фото додано. Надішліть ще або напишіть Готово.")
+    await message.answer("📸 Фото додано. Можете додати ще або натиснути «✅ Готово».")
 
-@dp.message(OfferFSM.photos, F.text)
-async def finish_photos(message: Message, state: FSMContext):
-    text = message.text.strip().lower().replace("'", "").replace("`", "")
-
-    if text != "готово":
-        await message.answer("📸 Фото додано. Надішліть ще або напишіть Готово.")
-        return
-
+@dp.message(OfferFSM.photos, F.text == "✅ Готово")
+async def finish_offer(message: Message, state: FSMContext):
     data = await state.get_data()
 
     if not data.get("photos"):
@@ -180,7 +188,11 @@ async def finish_photos(message: Message, state: FSMContext):
     ]
 
     await bot.send_media_group(GROUP_CHAT_ID, media)
-    await message.answer("✅ Пропозицію опубліковано!\n\n/start — створити нову")
+
+    await message.answer(
+        "✅ Пропозицію опубліковано!\n\n/start — створити нову",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     await state.clear()
 
 # ================= RUN =================
