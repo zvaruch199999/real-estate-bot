@@ -162,20 +162,21 @@ async def s13(message: Message, state: FSMContext):
 
 # ================= PHOTOS =================
 
+# приймаємо фото
 @dp.message(OfferFSM.photos, F.photo)
 async def add_photo(message: Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
     photos.append(message.photo[-1].file_id)
     await state.update_data(photos=photos)
-    await message.answer("📷 Фото додано. Можете додати ще або написати **Готово**.")
+    await message.answer(
+        "📷 Фото додано. Можете додати ще або написати **Готово**."
+    )
 
 
-@dp.message(OfferFSM.photos)
+# завершуємо по тексту "готово"
+@dp.message(OfferFSM.photos, F.text.lower() == "готово")
 async def finish_offer(message: Message, state: FSMContext):
-    if "готово" not in (message.text or "").lower():
-        return
-
     data = await state.get_data()
 
     if data.get("_finished"):
@@ -209,7 +210,6 @@ async def finish_offer(message: Message, state: FSMContext):
     ]
 
     await bot.send_media_group(GROUP_CHAT_ID, media)
-
     await message.answer("✅ Пропозицію опубліковано!\n\n/start — нова пропозиція")
 
 
