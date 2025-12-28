@@ -1,8 +1,9 @@
-from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.state import State, StatesGroup
 
-class OfferForm(StatesGroup):
+class CreateOffer(StatesGroup):
     category = State()
     housing_type = State()
+    housing_type_custom = State()
     street = State()
     city = State()
     district = State()
@@ -11,12 +12,11 @@ class OfferForm(StatesGroup):
     deposit = State()
     commission = State()
     parking = State()
-    move_in_from = State()
+    settlement_from = State()
     viewings_from = State()
-    broker = State()
     photos = State()
     preview = State()
 
-class EditForm(StatesGroup):
-    choose_field = State()
-    enter_value = State()
+class EditOffer(StatesGroup):
+    pick_field = State()
+    new_value = State()
