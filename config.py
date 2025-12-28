@@ -1,22 +1,16 @@
 import os
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+def _req(name: str) -> str:
+    val = os.getenv(name)
+    if not val:
+        raise RuntimeError(f"{name} не заданий (Railway Variables)")
+    return val
 
-# Ти казав що маєш GROUP_CHAT_ID
-GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "").strip()
+BOT_TOKEN = _req("BOT_TOKEN")
 
-DB_PATH = os.getenv("DB_PATH", "data/offers.sqlite").strip()
+# В Railway змінні: GROUP_CHAT_ID = -100xxxxxxxxxx
+GROUP_CHAT_ID = int(_req("GROUP_CHAT_ID"))
 
-
-def require_env(name: str, value: str) -> str:
-    if not value:
-        raise RuntimeError(f"{name} не заданий (Railway → Variables)")
-    return value
-
-
-def get_group_chat_id() -> int:
-    raw = require_env("GROUP_CHAT_ID", GROUP_CHAT_ID)
-    try:
-        return int(raw)
-    except ValueError:
-        raise RuntimeError("GROUP_CHAT_ID має бути числом (наприклад -1001234567890)")
+# (опційно) якщо хочеш обмежити доступ тільки собі:
+# ADMIN_USER_IDS="1057216609,123..."
+ADMIN_USER_IDS = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()]
