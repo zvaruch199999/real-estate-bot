@@ -1,172 +1,192 @@
+import json
 import aiosqlite
-from datetime import datetime
+from datetime import datetime, timezone
 
-STATUS_ACTIVE = "ACTIVE"
-STATUS_RESERVED = "RESERVED"
-STATUS_REMOVED = "REMOVED"
-STATUS_CLOSED = "CLOSED"
+DB_PATH = "data/bot.db"
 
 def now_iso() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
-class DB:
-    def __init__(self, path: str):
-        self.path = path
+STATUS_DRAFT = "DRAFT"
+STATUS_ACTIVE = "ACTIVE"
+STATUS_RESERVE = "RESERVE"
+STATUS_WITHDRAWN = "WITHDRAWN"   # показуємо як "Знято"
+STATUS_CLOSED = "CLOSED"
 
-    async def init(self):
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS offers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                created_by_id INTEGER NOT NULL,
-                created_by_username TEXT,
-                category TEXT,
-                housing_type TEXT,
-                street TEXT,
-                city TEXT,
-                district TEXT,
-                advantages TEXT,
-                rent TEXT,
-                deposit TEXT,
-                commission TEXT,
-                parking TEXT,
-                move_in_from TEXT,
-                viewings_from TEXT,
-                broker TEXT,
-                status TEXT NOT NULL,
-                group_chat_id INTEGER,
-                group_message_id INTEGER
+STATUS_LABELS = {
+    STATUS_DRAFT: "📝 Чернетка",
+    STATUS_ACTIVE: "🟢 Актуально",
+    STATUS_RESERVE: "🟡 Резерв",
+    STATUS_WITHDRAWN: "⚫️ Знято",
+    STATUS_CLOSED: "✅ Угода закрита",
+}
+
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS listings(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number INTEGER UNIQUE,
+            status TEXT,
+            category TEXT,
+            housing_type TEXT,
+            street TEXT,
+            city TEXT,
+            district TEXT,
+            advantages TEXT,
+            rent TEXT,
+            deposit TEXT,
+            commission TEXT,
+            parking TEXT,
+            settlement_from TEXT,
+            viewings_from TEXT,
+            broker TEXT,
+            photos_json TEXT,
+            group_chat_id INTEGER,
+            group_message_id INTEGER,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS status_history(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            listing_id INTEGER,
+            number INTEGER,
+            status TEXT,
+            changed_by TEXT,
+            changed_at TEXT
+        )
+        """)
+        await db.commit()
+
+async def _next_number(db: aiosqlite.Connection) -> int:
+    cur = await db.execute("SELECT COALESCE(MAX(number), 0) + 1 FROM listings")
+    (n,) = await cur.fetchone()
+    await cur.close()
+    return int(n)
+
+async def create_listing(broker: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN")
+        number = await _next_number(db)
+        ts = now_iso()
+        await db.execute("""
+            INSERT INTO listings(
+                number,status,category,housing_type,street,city,district,advantages,
+                rent,deposit,commission,parking,settlement_from,viewings_from,broker,
+                photos_json,group_chat_id,group_message_id,created_at,updated_at
             )
-            """)
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS offer_photos (
-                offer_id INTEGER NOT NULL,
-                file_id TEXT NOT NULL,
-                pos INTEGER NOT NULL,
-                FOREIGN KEY(offer_id) REFERENCES offers(id)
-            )
-            """)
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS status_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                offer_id INTEGER NOT NULL,
-                ts TEXT NOT NULL,
-                user_id INTEGER NOT NULL,
-                username TEXT,
-                old_status TEXT,
-                new_status TEXT,
-                FOREIGN KEY(offer_id) REFERENCES offers(id)
-            )
-            """)
-            await db.commit()
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            number, STATUS_DRAFT,
+            "", "", "", "", "", "",
+            "", "", "", "", "", "",
+            broker, json.dumps([]), None, None, ts, ts
+        ))
+        await db.execute("""
+            INSERT INTO status_history(listing_id, number, status, changed_by, changed_at)
+            VALUES((SELECT id FROM listings WHERE number=?), ?, ?, ?, ?)
+        """, (number, number, STATUS_DRAFT, broker, ts))
+        await db.commit()
+        return number
 
-    async def create_offer(self, created_by_id: int, created_by_username: str, data: dict) -> int:
-        async with aiosqlite.connect(self.path) as db:
-            cur = await db.execute("""
-                INSERT INTO offers (
-                    created_at, created_by_id, created_by_username,
-                    category, housing_type, street, city, district,
-                    advantages, rent, deposit, commission, parking,
-                    move_in_from, viewings_from, broker, status
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                now_iso(), created_by_id, created_by_username,
-                data.get("category"), data.get("housing_type"),
-                data.get("street"), data.get("city"), data.get("district"),
-                data.get("advantages"), data.get("rent"), data.get("deposit"),
-                data.get("commission"), data.get("parking"),
-                data.get("move_in_from"), data.get("viewings_from"),
-                data.get("broker"), STATUS_ACTIVE
-            ))
-            await db.commit()
-            return cur.lastrowid
+async def get_listing(number: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM listings WHERE number=?", (number,))
+        row = await cur.fetchone()
+        await cur.close()
+        return dict(row) if row else None
 
-    async def set_photos(self, offer_id: int, photos: list[str]):
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute("DELETE FROM offer_photos WHERE offer_id=?", (offer_id,))
-            for i, fid in enumerate(photos, start=1):
-                await db.execute(
-                    "INSERT INTO offer_photos(offer_id,file_id,pos) VALUES (?,?,?)",
-                    (offer_id, fid, i)
-                )
-            await db.commit()
+async def update_field(number: int, field: str, value: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            f"UPDATE listings SET {field}=?, updated_at=? WHERE number=?",
+            (value, now_iso(), number)
+        )
+        await db.commit()
 
-    async def get_photos(self, offer_id: int) -> list[str]:
-        async with aiosqlite.connect(self.path) as db:
-            cur = await db.execute(
-                "SELECT file_id FROM offer_photos WHERE offer_id=? ORDER BY pos ASC",
-                (offer_id,)
-            )
-            rows = await cur.fetchall()
-            return [r[0] for r in rows]
+async def add_photo(number: int, file_id: str):
+    listing = await get_listing(number)
+    if not listing:
+        return
+    photos = json.loads(listing["photos_json"] or "[]")
+    photos.append(file_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE listings SET photos_json=?, updated_at=? WHERE number=?",
+            (json.dumps(photos), now_iso(), number)
+        )
+        await db.commit()
 
-    async def get_offer(self, offer_id: int) -> dict | None:
-        async with aiosqlite.connect(self.path) as db:
-            cur = await db.execute("SELECT * FROM offers WHERE id=?", (offer_id,))
-            row = await cur.fetchone()
-            if not row:
-                return None
-            cols = [d[0] for d in cur.description]
-            return dict(zip(cols, row))
+async def clear_photos(number: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE listings SET photos_json=?, updated_at=? WHERE number=?",
+            (json.dumps([]), now_iso(), number)
+        )
+        await db.commit()
 
-    async def update_offer_field(self, offer_id: int, field: str, value: str):
-        if field not in {
-            "category","housing_type","street","city","district","advantages",
-            "rent","deposit","commission","parking","move_in_from","viewings_from","broker"
-        }:
-            return
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute(f"UPDATE offers SET {field}=? WHERE id=?", (value, offer_id))
-            await db.commit()
+async def set_group_message(number: int, chat_id: int, message_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE listings
+            SET group_chat_id=?, group_message_id=?, updated_at=?
+            WHERE number=?
+        """, (chat_id, message_id, now_iso(), number))
+        await db.commit()
 
-    async def set_group_message(self, offer_id: int, group_chat_id: int, group_message_id: int):
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute(
-                "UPDATE offers SET group_chat_id=?, group_message_id=? WHERE id=?",
-                (group_chat_id, group_message_id, offer_id)
-            )
-            await db.commit()
+async def set_status(number: int, status: str, changed_by: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE listings
+            SET status=?, updated_at=?
+            WHERE number=?
+        """, (status, now_iso(), number))
 
-    async def change_status(self, offer_id: int, user_id: int, username: str, new_status: str):
-        async with aiosqlite.connect(self.path) as db:
-            cur = await db.execute("SELECT status FROM offers WHERE id=?", (offer_id,))
-            row = await cur.fetchone()
-            if not row:
-                return None
-            old = row[0]
-            await db.execute("UPDATE offers SET status=? WHERE id=?", (new_status, offer_id))
-            await db.execute("""
-                INSERT INTO status_log(offer_id, ts, user_id, username, old_status, new_status)
-                VALUES (?,?,?,?,?,?)
-            """, (offer_id, now_iso(), user_id, username, old, new_status))
-            await db.commit()
-            return old
+        await db.execute("""
+            INSERT INTO status_history(listing_id, number, status, changed_by, changed_at)
+            VALUES((SELECT id FROM listings WHERE number=?), ?, ?, ?, ?)
+        """, (number, number, status, changed_by, now_iso()))
+        await db.commit()
 
-    async def stats_counts(self, date_from: str, date_to: str) -> dict:
-        # counts по статусам за період (по логах)
-        async with aiosqlite.connect(self.path) as db:
-            cur = await db.execute("""
-                SELECT new_status, COUNT(*)
-                FROM status_log
-                WHERE ts >= ? AND ts < ?
-                GROUP BY new_status
-            """, (date_from, date_to))
-            rows = await cur.fetchall()
-            return {k: v for k, v in rows}
+async def delete_listing(number: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM status_history WHERE number=?", (number,))
+        await db.execute("DELETE FROM listings WHERE number=?", (number,))
+        await db.commit()
 
-    async def stats_by_broker_status(self, date_from: str, date_to: str) -> dict:
-        # username -> {status -> count}
-        async with aiosqlite.connect(self.path) as db:
-            cur = await db.execute("""
-                SELECT COALESCE(username,'(no_username)') as u, new_status, COUNT(*)
-                FROM status_log
-                WHERE ts >= ? AND ts < ?
-                GROUP BY u, new_status
-                ORDER BY u
-            """, (date_from, date_to))
-            rows = await cur.fetchall()
-            out = {}
-            for u, st, c in rows:
-                out.setdefault(u, {})[st] = c
-            return out
+async def stats_period(start_iso: str, end_iso: str):
+    """
+    Рахує по history: скільки разів за період ставили кожен статус,
+    і по маклерам — скільки разів кожен статус.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        # totals
+        cur = await db.execute("""
+            SELECT status, COUNT(*) as cnt
+            FROM status_history
+            WHERE changed_at >= ? AND changed_at < ?
+            GROUP BY status
+        """, (start_iso, end_iso))
+        totals = {row[0]: row[1] for row in await cur.fetchall()}
+        await cur.close()
+
+        # by broker
+        cur = await db.execute("""
+            SELECT changed_by, status, COUNT(*) as cnt
+            FROM status_history
+            WHERE changed_at >= ? AND changed_at < ?
+            GROUP BY changed_by, status
+            ORDER BY changed_by
+        """, (start_iso, end_iso))
+        by_broker = {}
+        rows = await cur.fetchall()
+        await cur.close()
+
+        for who, st, cnt in rows:
+            by_broker.setdefault(who or "—", {})
+            by_broker[who or "—"][st] = cnt
+
+        return totals, by_broker
