@@ -7,9 +7,11 @@
 # ✅ Статистика (день/місяць/рік): загалом + по маклерах (кількість кожного статусу)
 # ✅ /export (Excel) — генерує файл і надсилає в чат
 #
-# 🔧 Правки за твоїм запитом:
-# 1) При створенні пропозиції ставимо статус: ❔ Невідома (і одразу рахуємо в статистику)
+# 🔧 Правки:
+# 1) При створенні пропозиції ставимо статус: ❔ Невідома
 # 2) Паркінг: можна обрати кнопкою або вписати текстом
+# 3) Додано поле "Прописка" перед паркінгом
+# 4) Додано поле "Джерело ключів" останнім перед фото
 
 import os
 import json
@@ -52,7 +54,7 @@ if ALLOWED_USER_IDS_RAW:
         if part.isdigit():
             ALLOWED_USER_IDS.add(int(part))
 
-APP_TZ = timezone.utc  # за потреби можна змінити
+APP_TZ = timezone.utc
 
 
 STATUS = {
@@ -79,6 +81,13 @@ def db_conn() -> sqlite3.Connection:
     return con
 
 
+def ensure_column(cur: sqlite3.Cursor, table: str, column: str, column_def: str):
+    cur.execute(f"PRAGMA table_info({table});")
+    existing = [row[1] for row in cur.fetchall()]
+    if column not in existing:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def};")
+
+
 def init_db():
     con = db_conn()
     cur = con.cursor()
@@ -98,9 +107,11 @@ def init_db():
             rent TEXT,
             deposit TEXT,
             commission TEXT,
+            registration TEXT DEFAULT '',
             parking TEXT,
             move_in_from TEXT,
             viewings_from TEXT,
+            keys_source TEXT DEFAULT '',
             broker_username TEXT,
             broker_user_id INTEGER,
             photos_json TEXT,
@@ -111,6 +122,10 @@ def init_db():
         );
         """
     )
+
+    # ✅ Якщо база вже існувала раніше, ці колонки додадуться автоматично
+    ensure_column(cur, "offers", "registration", "TEXT DEFAULT ''")
+    ensure_column(cur, "offers", "keys_source", "TEXT DEFAULT ''")
 
     cur.execute(
         """
@@ -181,10 +196,6 @@ def set_status(offer_id: int, status: str, username: str, user_id: int):
 
 
 def create_offer(broker_username: str, broker_user_id: int) -> int:
-    """
-    Створює пропозицію зі статусом ❔ Невідома
-    і одразу записує подію в status_events (для статистики).
-    """
     seq = next_seq()
     created = now_iso()
 
@@ -194,9 +205,9 @@ def create_offer(broker_username: str, broker_user_id: int) -> int:
         """
         INSERT INTO offers (
             seq, created_at, category, housing_type, street, city, district, advantages,
-            rent, deposit, commission, parking, move_in_from, viewings_from,
-            broker_username, broker_user_id, photos_json, current_status, is_published
-        ) VALUES (?, ?, '', '', '', '', '', '', '', '', '', '', '', '', ?, ?, '[]', ?, 0);
+            rent, deposit, commission, registration, parking, move_in_from, viewings_from,
+            keys_source, broker_username, broker_user_id, photos_json, current_status, is_published
+        ) VALUES (?, ?, '', '', '', '', '', '', '', '', '', '', '', '', '', '', ?, ?, '[]', ?, 0);
         """,
         (seq, created, broker_username, broker_user_id, "unknown"),
     )
@@ -204,9 +215,7 @@ def create_offer(broker_username: str, broker_user_id: int) -> int:
     offer_id = cur.lastrowid
     con.close()
 
-    # ✅ одразу рахуємо як "Невідома" в статистику
     set_status(offer_id, "unknown", username=broker_username, user_id=broker_user_id)
-
     return offer_id
 
 
@@ -265,9 +274,11 @@ def offer_text(offer: sqlite3.Row) -> str:
         line("💶", "Оренда", "rent"),
         line("🔐", "Депозит", "deposit"),
         line("🤝", "Комісія", "commission"),
+        line("🪪", "Прописка", "registration"),
         line("🚗", "Паркінг", "parking"),
         line("📦", "Заселення від", "move_in_from"),
         line("👀", "Огляди від", "viewings_from"),
+        line("🔑", "Джерело ключів", "keys_source"),
         f"🧑‍💼 <b>Маклер:</b> {esc(broker)}",
     ]
     return "\n".join(parts)
@@ -298,15 +309,12 @@ def kb_housing_type() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="Будинок", callback_data="ht:Будинок"),
             InlineKeyboardButton(text="Студія", callback_data="ht:Студія"),
         ],
-        [
-            InlineKeyboardButton(text="Інше…", callback_data="ht_other"),
-        ],
+        [InlineKeyboardButton(text="Інше…", callback_data="ht_other")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_parking() -> InlineKeyboardMarkup:
-    # кнопки лишаємо + дозволяємо текстом у цьому ж кроці
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -338,8 +346,6 @@ def kb_preview_actions() -> InlineKeyboardMarkup:
 
 
 def kb_status_buttons(offer_id: int) -> InlineKeyboardMarkup:
-    # статус "Невідома" не робимо кнопкою — це стартовий стан,
-    # далі маклер переводить у потрібний статус
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -368,9 +374,11 @@ class OfferFSM(StatesGroup):
     RENT = State()
     DEPOSIT = State()
     COMMISSION = State()
+    REGISTRATION = State()
     PARKING = State()
     MOVE_IN_FROM = State()
     VIEWINGS_FROM = State()
+    KEYS_SOURCE = State()
     PHOTOS = State()
     PREVIEW = State()
     EDIT_CHOOSE = State()
@@ -387,17 +395,19 @@ EDIT_FIELDS = [
     (7, "Оренда", "rent"),
     (8, "Депозит", "deposit"),
     (9, "Комісія", "commission"),
-    (10, "Паркінг", "parking"),
-    (11, "Заселення від", "move_in_from"),
-    (12, "Огляди від", "viewings_from"),
-    (13, "Маклер", "broker_username"),
+    (10, "Прописка", "registration"),
+    (11, "Паркінг", "parking"),
+    (12, "Заселення від", "move_in_from"),
+    (13, "Огляди від", "viewings_from"),
+    (14, "Джерело ключів", "keys_source"),
+    (15, "Маклер", "broker_username"),
 ]
 
 
 def edit_list_text(seq: int) -> str:
     lines = [
         f"✏️ <b>Редагування #{seq:04d}</b>",
-        "Напиши номер пункту 1–13, який хочеш змінити.",
+        "Напиши номер пункту 1–15, який хочеш змінити.",
         "",
         "<b>Список:</b>",
     ]
@@ -539,6 +549,17 @@ async def msg_commission(message: types.Message, state: FSMContext):
     data = await state.get_data()
     offer_id = data["offer_id"]
     update_offer(offer_id, commission=(message.text or "").strip())
+
+    await state.set_state(OfferFSM.REGISTRATION)
+    await message.answer("🪪 Напиши <b>прописка</b> / чи можлива реєстрація:")
+
+
+@router.message(OfferFSM.REGISTRATION)
+async def msg_registration(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    offer_id = data["offer_id"]
+    update_offer(offer_id, registration=(message.text or "").strip())
+
     await state.set_state(OfferFSM.PARKING)
     await message.answer(
         "🚗 Паркінг: обери кнопкою або <b>напиши текстом</b> (наприклад: 'підземний 50€')",
@@ -584,6 +605,16 @@ async def msg_viewings(message: types.Message, state: FSMContext):
     data = await state.get_data()
     offer_id = data["offer_id"]
     update_offer(offer_id, viewings_from=(message.text or "").strip())
+
+    await state.set_state(OfferFSM.KEYS_SOURCE)
+    await message.answer("🔑 Напиши <b>джерело ключів</b>:")
+
+
+@router.message(OfferFSM.KEYS_SOURCE)
+async def msg_keys_source(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    offer_id = data["offer_id"]
+    update_offer(offer_id, keys_source=(message.text or "").strip())
 
     await state.set_state(OfferFSM.PHOTOS)
     await message.answer("📸 Надішли фото. Коли закінчиш — натисни ✅ Готово або /done.", reply_markup=kb_photos_done())
@@ -658,7 +689,6 @@ async def cb_cancel(call: types.CallbackQuery, state: FSMContext):
     offer = get_offer(offer_id) if offer_id else None
 
     if offer and int(offer["is_published"] or 0) == 0:
-        # якщо скасовано до публікації — прибираємо і offer, і status_events
         con = db_conn()
         cur = con.cursor()
         cur.execute("DELETE FROM status_events WHERE offer_id = ?;", (offer_id,))
@@ -755,13 +785,13 @@ async def msg_edit_choose(message: types.Message, state: FSMContext):
 
     text = (message.text or "").strip()
     if not text.isdigit():
-        await message.answer("Напиши номер пункту 1–13 (наприклад 2).")
+        await message.answer("Напиши номер пункту 1–15 (наприклад 2).")
         return
 
     num = int(text)
     field_map = {n: (name, key) for n, name, key in EDIT_FIELDS}
     if num not in field_map:
-        await message.answer("Невірний номер. Напиши 1–13.")
+        await message.answer("Невірний номер. Напиши 1–15.")
         return
 
     name, key = field_map[num]
@@ -1055,9 +1085,11 @@ def export_to_excel(filepath: str, period: str = "all") -> None:
             "Rent",
             "Deposit",
             "Commission",
+            "Registration",
             "Parking",
             "MoveInFrom",
             "ViewingsFrom",
+            "KeysSource",
             "Broker",
             "BrokerUserId",
             "PhotosCount",
@@ -1086,9 +1118,11 @@ def export_to_excel(filepath: str, period: str = "all") -> None:
                 r["rent"],
                 r["deposit"],
                 r["commission"],
+                r["registration"],
                 r["parking"],
                 r["move_in_from"],
                 r["viewings_from"],
+                r["keys_source"],
                 r["broker_username"],
                 r["broker_user_id"],
                 len(photos),
