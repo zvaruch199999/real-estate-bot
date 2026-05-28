@@ -11,8 +11,7 @@
 # 1) При створенні пропозиції ставимо статус: ❔ Невідома
 # 2) Паркінг: можна обрати кнопкою або вписати текстом
 # 3) Додано поле "Прописка" перед паркінгом
-# 4) Видалено поле "Джерело ключів / Джерело житла"
-# 5) Наступний номер пропозиції починається від #0125
+# 4) Додано поле "Джерело ключів" останнім перед фото
 
 import os
 import json
@@ -56,10 +55,6 @@ if ALLOWED_USER_IDS_RAW:
             ALLOWED_USER_IDS.add(int(part))
 
 APP_TZ = timezone.utc
-
-# ✅ Наступна пропозиція буде мінімум #0125.
-# Якщо в базі вже є #0125 або більше — бот продовжить від найбільшого номера + 1.
-SEQ_START_FROM = 125
 
 
 STATUS = {
@@ -116,6 +111,7 @@ def init_db():
             parking TEXT,
             move_in_from TEXT,
             viewings_from TEXT,
+            keys_source TEXT DEFAULT '',
             broker_username TEXT,
             broker_user_id INTEGER,
             photos_json TEXT,
@@ -127,9 +123,9 @@ def init_db():
         """
     )
 
-    # ✅ Якщо база вже існувала раніше, колонка "registration" додасться автоматично.
-    # Колонку keys_source не використовуємо і не показуємо.
+    # ✅ Якщо база вже існувала раніше, ці колонки додадуться автоматично
     ensure_column(cur, "offers", "registration", "TEXT DEFAULT ''")
+    ensure_column(cur, "offers", "keys_source", "TEXT DEFAULT ''")
 
     cur.execute(
         """
@@ -155,26 +151,18 @@ def now_iso() -> str:
 def next_seq() -> int:
     con = db_conn()
     cur = con.cursor()
-    cur.execute("SELECT COALESCE(MAX(seq), 0) AS max_seq FROM offers;")
+    cur.execute("SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM offers;")
     row = cur.fetchone()
     con.close()
-
-    max_seq = int(row["max_seq"] or 0)
-
-    if max_seq < SEQ_START_FROM:
-        return SEQ_START_FROM
-
-    return max_seq + 1
+    return int(row["next_seq"])
 
 
 def update_offer(offer_id: int, **fields):
     if not fields:
         return
-
     keys = list(fields.keys())
     vals = [fields[k] for k in keys]
     sets = ", ".join([f"{k} = ?" for k in keys])
-
     con = db_conn()
     cur = con.cursor()
     cur.execute(f"UPDATE offers SET {sets} WHERE id = ?;", (*vals, offer_id))
@@ -218,8 +206,8 @@ def create_offer(broker_username: str, broker_user_id: int) -> int:
         INSERT INTO offers (
             seq, created_at, category, housing_type, street, city, district, advantages,
             rent, deposit, commission, registration, parking, move_in_from, viewings_from,
-            broker_username, broker_user_id, photos_json, current_status, is_published
-        ) VALUES (?, ?, '', '', '', '', '', '', '', '', '', '', '', '', '', ?, ?, '[]', ?, 0);
+            keys_source, broker_username, broker_user_id, photos_json, current_status, is_published
+        ) VALUES (?, ?, '', '', '', '', '', '', '', '', '', '', '', '', '', '', ?, ?, '[]', ?, 0);
         """,
         (seq, created, broker_username, broker_user_id, "unknown"),
     )
@@ -235,12 +223,10 @@ def add_photo(offer_id: int, file_id: str):
     offer = get_offer(offer_id)
     if not offer:
         return
-
     try:
         photos = json.loads(offer["photos_json"] or "[]")
     except Exception:
         photos = []
-
     photos.append(file_id)
     update_offer(offer_id, photos_json=json.dumps(photos, ensure_ascii=False))
 
@@ -292,6 +278,7 @@ def offer_text(offer: sqlite3.Row) -> str:
         line("🚗", "Паркінг", "parking"),
         line("📦", "Заселення від", "move_in_from"),
         line("👀", "Огляди від", "viewings_from"),
+        line("🔑", "Джерело ключів", "keys_source"),
         f"🧑‍💼 <b>Маклер:</b> {esc(broker)}",
     ]
     return "\n".join(parts)
@@ -391,6 +378,7 @@ class OfferFSM(StatesGroup):
     PARKING = State()
     MOVE_IN_FROM = State()
     VIEWINGS_FROM = State()
+    KEYS_SOURCE = State()
     PHOTOS = State()
     PREVIEW = State()
     EDIT_CHOOSE = State()
@@ -411,14 +399,15 @@ EDIT_FIELDS = [
     (11, "Паркінг", "parking"),
     (12, "Заселення від", "move_in_from"),
     (13, "Огляди від", "viewings_from"),
-    (14, "Маклер", "broker_username"),
+    (14, "Джерело ключів", "keys_source"),
+    (15, "Маклер", "broker_username"),
 ]
 
 
 def edit_list_text(seq: int) -> str:
     lines = [
         f"✏️ <b>Редагування #{seq:04d}</b>",
-        "Напиши номер пункту 1–14, який хочеш змінити.",
+        "Напиши номер пункту 1–15, який хочеш змінити.",
         "",
         "<b>Список:</b>",
     ]
@@ -617,6 +606,16 @@ async def msg_viewings(message: types.Message, state: FSMContext):
     offer_id = data["offer_id"]
     update_offer(offer_id, viewings_from=(message.text or "").strip())
 
+    await state.set_state(OfferFSM.KEYS_SOURCE)
+    await message.answer("🔑 Напиши <b>джерело ключів</b>:")
+
+
+@router.message(OfferFSM.KEYS_SOURCE)
+async def msg_keys_source(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    offer_id = data["offer_id"]
+    update_offer(offer_id, keys_source=(message.text or "").strip())
+
     await state.set_state(OfferFSM.PHOTOS)
     await message.answer("📸 Надішли фото. Коли закінчиш — натисни ✅ Готово або /done.", reply_markup=kb_photos_done())
 
@@ -786,13 +785,13 @@ async def msg_edit_choose(message: types.Message, state: FSMContext):
 
     text = (message.text or "").strip()
     if not text.isdigit():
-        await message.answer("Напиши номер пункту 1–14 (наприклад 2).")
+        await message.answer("Напиши номер пункту 1–15 (наприклад 2).")
         return
 
     num = int(text)
     field_map = {n: (name, key) for n, name, key in EDIT_FIELDS}
     if num not in field_map:
-        await message.answer("Невірний номер. Напиши 1–14.")
+        await message.answer("Невірний номер. Напиши 1–15.")
         return
 
     name, key = field_map[num]
@@ -1090,6 +1089,7 @@ def export_to_excel(filepath: str, period: str = "all") -> None:
             "Parking",
             "MoveInFrom",
             "ViewingsFrom",
+            "KeysSource",
             "Broker",
             "BrokerUserId",
             "PhotosCount",
@@ -1122,6 +1122,7 @@ def export_to_excel(filepath: str, period: str = "all") -> None:
                 r["parking"],
                 r["move_in_from"],
                 r["viewings_from"],
+                r["keys_source"],
                 r["broker_username"],
                 r["broker_user_id"],
                 len(photos),
