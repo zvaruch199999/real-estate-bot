@@ -278,7 +278,6 @@ def offer_text(offer: sqlite3.Row) -> str:
         line("🚗", "Паркінг", "parking"),
         line("📦", "Заселення від", "move_in_from"),
         line("👀", "Огляди від", "viewings_from"),
-        line("🔑", "Джерело ключів", "keys_source"),
         f"🧑‍💼 <b>Маклер:</b> {esc(broker)}",
     ]
     return "\n".join(parts)
@@ -378,7 +377,6 @@ class OfferFSM(StatesGroup):
     PARKING = State()
     MOVE_IN_FROM = State()
     VIEWINGS_FROM = State()
-    KEYS_SOURCE = State()
     PHOTOS = State()
     PREVIEW = State()
     EDIT_CHOOSE = State()
@@ -399,8 +397,7 @@ EDIT_FIELDS = [
     (11, "Паркінг", "parking"),
     (12, "Заселення від", "move_in_from"),
     (13, "Огляди від", "viewings_from"),
-    (14, "Джерело ключів", "keys_source"),
-    (15, "Маклер", "broker_username"),
+    (14, "Маклер", "broker_username"),
 ]
 
 
@@ -605,16 +602,6 @@ async def msg_viewings(message: types.Message, state: FSMContext):
     data = await state.get_data()
     offer_id = data["offer_id"]
     update_offer(offer_id, viewings_from=(message.text or "").strip())
-
-    await state.set_state(OfferFSM.KEYS_SOURCE)
-    await message.answer("🔑 Напиши <b>джерело ключів</b>:")
-
-
-@router.message(OfferFSM.KEYS_SOURCE)
-async def msg_keys_source(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    offer_id = data["offer_id"]
-    update_offer(offer_id, keys_source=(message.text or "").strip())
 
     await state.set_state(OfferFSM.PHOTOS)
     await message.answer("📸 Надішли фото. Коли закінчиш — натисни ✅ Готово або /done.", reply_markup=kb_photos_done())
